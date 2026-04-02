@@ -267,12 +267,26 @@ class Kanban:
 
 def main():
     """Simple CLI for the kanban board."""
-    import sys
+    import argparse
 
-    kb = Kanban("kanban.json")
+    parser = argparse.ArgumentParser(description="Kanban board CLI")
+    parser.add_argument(
+        "-f", "--file", default="kanban.json", help="Path to kanban.json file"
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="show",
+        choices=["show", "pickup", "done", "review", "status"],
+        help="Command to run (default: show)",
+    )
+    parser.add_argument("args", nargs="*", help="Additional arguments for the command")
+    ns = parser.parse_args()
+
+    kb = Kanban(ns.file)
     kb.load()
 
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "show"
+    cmd = ns.command
 
     if cmd == "show":
         print(kb.visualize())
@@ -300,13 +314,13 @@ def main():
         else:
             print("No more tasks.")
     elif cmd == "status":
-        task_id = sys.argv[2]
-        new_status = sys.argv[3]
+        if len(ns.args) < 2:
+            parser.error("status requires <id> and <status> arguments")
+        task_id = ns.args[0]
+        new_status = ns.args[1]
         kb.set_status(task_id, new_status)
         kb.save()
         print(f"Set {task_id} → {new_status}")
-    else:
-        print("Commands: show | pickup | done | review | status <id> <status>")
 
 
 if __name__ == "__main__":
