@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from pipeline import Kanban
-from pipeline import (
+from kanban import Kanban
+from lib import (
     checkout_main_and_pull,
     create_branch,
     get_diff,
 )
-from pipeline import (
+from lib import (
     build_pm_prompt,
     build_swe_prompt,
     build_cr_prompt,
@@ -19,11 +19,7 @@ from pipeline import (
     build_sanity_prompt,
 )
 
-# Import main.py (the CLI entry point) which lives at repo root
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from main import PipelineConfig, run_pipeline, resolve_phase_file
+from pipeline import PipelineConfig, run_pipeline, resolve_phase_file
 
 
 class TestDryRunSingleTask:

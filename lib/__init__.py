@@ -1,6 +1,5 @@
-"""Pipeline package."""
+"""Pipeline lib package."""
 
-from .kanban import Kanban
 from .git import (
     checkout_main_and_pull,
     create_branch,
@@ -23,7 +22,6 @@ from .prompts import (
 )
 
 __all__ = [
-    "Kanban",
     "checkout_main_and_pull",
     "create_branch",
     "get_diff",

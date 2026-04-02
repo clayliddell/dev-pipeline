@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from pipeline.git import (
+from lib.git import (
     checkout_main_and_pull,
     branch_exists,
     delete_branch,

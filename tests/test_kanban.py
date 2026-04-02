@@ -3,7 +3,7 @@
 import json
 import pytest
 
-from pipeline.kanban import Kanban, STATUSES
+from kanban import Kanban, STATUSES
 
 
 class TestLoad:

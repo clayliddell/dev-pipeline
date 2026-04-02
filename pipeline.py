@@ -9,8 +9,8 @@ from pathlib import Path
 
 from dataclasses import dataclass
 
-from pipeline import (
-    Kanban,
+from kanban import Kanban
+from lib import (
     checkout_main_and_pull,
     create_branch,
     get_diff,
@@ -93,7 +93,11 @@ def read_file(path: Path) -> str:
 
 
 def mock_run_agent(
-    prompt: str, project_dir: Path, opencode_config_path: Path, agent: str = "default", **kwargs
+    prompt: str,
+    project_dir: Path,
+    opencode_config_path: Path,
+    agent: str = "default",
+    **kwargs,
 ) -> str:
     """Dry-run stub — prints a summary and returns canned JSON output."""
     preview = prompt[:120].replace("\n", " ")

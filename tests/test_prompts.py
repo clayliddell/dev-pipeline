@@ -2,14 +2,14 @@
 
 import pytest
 
-from pipeline.prompts import (
+from lib.prompts import (
     build_pm_prompt,
     build_swe_prompt,
     build_cr_prompt,
     build_cr_eval_prompt,
     build_sanity_prompt,
 )
-from pipeline.agents import parse_agent_response
+from lib.agents import parse_agent_response
 
 
 SAMPLE_TASK = {
