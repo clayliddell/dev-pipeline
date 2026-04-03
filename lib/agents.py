@@ -1,19 +1,14 @@
-"""Agent runner — wraps `opencode run` with real-time output streaming."""
+"""Agent runner — wraps `opencode run` with block output."""
 
 import json
+import os
 import re
+import threading
 from pathlib import Path
 import subprocess
-import sys
 import tiktoken
 
-# Define term color codes
-AGENT = "\033[38;2;255;255;0m"
-PROMPT = "\033[91m"
-THINKING = "\033[95m"
-INFO = "\033[38;2;255;255;0m"
-RESPONSE = "\033[36m"
-RESET = "\033[0m"  # Always reset after coloring
+from lib.tui import TerminalBlock, print_block
 
 
 def count_tokens(prompt):
@@ -21,25 +16,36 @@ def count_tokens(prompt):
     enc = tiktoken.encoding_for_model("gpt-4o")
     return len(enc.encode(prompt))
 
+
 def run_agent(
     prompt: str,
     project_dir: Path,
     opencode_config_path: Path,
     agent: str = "default",
     agent_name: str = "Default Agent",
+    task_id: str = "",
+    step_num: int = 0,
+    step_title: str = "",
 ) -> str:
-    """Run an opencode agent and stream output to terminal.
+    """Run an opencode agent and print block output.
 
     Args:
         prompt: The prompt to send to the agent.
         project_dir: Working directory (the project repo root).
+        opencode_config_path: Path to opencode config file.
         agent: Name of the pre-configured opencode agent to use.
+        agent_name: Display name for the agent.
+        task_id: Task identifier for block title prefix.
+        step_num: Step number for block title prefix.
+        step_title: Step title for block title prefix.
 
     Returns:
-        Full captured output from the agent.
+        Full captured response text from the agent.
+
+    Raises:
+        RuntimeError: If the agent process fails or returns invalid output.
     """
     cmd = [
-        f"OPENCODE_CONFIG={opencode_config_path}",
         "opencode",
         "run",
         prompt,
@@ -50,13 +56,8 @@ def run_agent(
         "json",
     ]
 
-    prompt_len = count_tokens(prompt)
-
-    print(f"\n{'─' * 60}")
-    print(f"{AGENT}[AGENT]\n{agent_name}\n[/AGENT]{RESET}")
-    print(f"{'─' * 60}")
-    print(f"{PROMPT}[PROMPT:{prompt_len}]\n{prompt}\n[/PROMPT:{prompt_len}]{RESET}")
-    print(f"{'─' * 60}")
+    env = os.environ.copy()
+    env["OPENCODE_CONFIG"] = str(opencode_config_path)
 
     proc = subprocess.Popen(
         cmd,
@@ -64,50 +65,100 @@ def run_agent(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=env,
     )
-    response_parts: list[str] = []
 
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
+    last_text_content: str = ""
+    prefix = f"{task_id} - Step {step_num}: {step_title}" if task_id else ""
 
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            sys.stdout.write(line + "\n")
-            sys.stdout.flush()
-            continue
+    prompt_len = count_tokens(prompt)
+    print_block(
+        TerminalBlock(
+            "AGENT", agent_name, subtitle=f"agent: {agent}", title_prefix=prefix
+        )
+    )
+    print_block(
+        TerminalBlock(
+            "PROMPT", prompt, subtitle=f"{prompt_len} tokens", title_prefix=prefix
+        )
+    )
 
-        etype = event.get("type", "")
-        part = event.get("part", {})
-        text = part.get("text", "")
+    def read_output():
+        nonlocal last_text_content
+        assert proc.stdout is not None
 
-        if etype == "reasoning" and text:
-            print(f"{THINKING}[THINKING]\n{text}\n[\\THINKING]{RESET}\n", flush=True)
-        elif etype == "text" and text:
-            print(f"{RESPONSE}[RESPONSE]\n{text}\n[\\RESPONSE]{RESET}\n", flush=True)
-            response_parts.append(text)
-        elif text:
-            print(f"{INFO}[INFO:{etype}]\n{text}\n[\\INFO:{etype}]{RESET}\n", flush=True)
+        current_type = None
+        buffered_parts: list[str] = []
+
+        def flush_buffer():
+            nonlocal current_type, buffered_parts
+            if current_type and buffered_parts:
+                full = "\n".join(buffered_parts)
+                block_type = "THINKING" if current_type == "reasoning" else "RESPONSE"
+                print_block(TerminalBlock(block_type, full, title_prefix=prefix))
+            current_type = None
+            buffered_parts = []
+
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                print_block(
+                    TerminalBlock(
+                        "INFO", line, subtitle="raw output", title_prefix=prefix
+                    )
+                )
+                continue
+
+            etype = event.get("type", "")
+            part = event.get("part", {})
+            text = part.get("text", "")
+
+            if not text:
+                continue
+
+            if etype == "reasoning":
+                if current_type != "reasoning":
+                    flush_buffer()
+                    current_type = "reasoning"
+                buffered_parts.append(text)
+            elif etype == "text":
+                if current_type != "text":
+                    flush_buffer()
+                    current_type = "text"
+                buffered_parts.append(text)
+                last_text_content = text
+            else:
+                flush_buffer()
+                print_block(
+                    TerminalBlock("INFO", text, subtitle=etype, title_prefix=prefix)
+                )
+
+        flush_buffer()
+
+    reader = threading.Thread(target=read_output)
+    reader.start()
+    reader.join()
 
     proc.wait()
 
     stderr = proc.stderr.read() if proc.stderr else ""
     if stderr:
-        print(stderr, file=sys.stderr)
+        print_block(
+            TerminalBlock("INFO", stderr, subtitle="stderr", title_prefix=prefix)
+        )
 
     if proc.returncode != 0:
         raise RuntimeError(
             f"Agent '{agent}' exited with code {proc.returncode}\nstderr: {stderr}"
         )
 
-    full_output = "".join(response_parts)
-
-    print(f"{'─' * 60}")
-    print(f"  Agent {agent} complete")
-    print(f"{'─' * 60}\n")
+    full_output = last_text_content
+    print_block(TerminalBlock("INFO", f"Agent {agent} complete", title_prefix=prefix))
 
     return full_output
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
 from dataclasses import dataclass
@@ -25,6 +24,12 @@ from lib import (
     build_cr_eval_prompt,
     build_sanity_prompt,
 )
+from lib.tui import (
+    TerminalBlock,
+    print_block,
+    setup_log,
+    close_log,
+)
 
 
 class PipelineError(Exception):
@@ -42,6 +47,8 @@ class PipelineConfig:
     max_tree_entries: int = 200
     loop_until_phase_complete: bool = True
     dry_run: bool = False
+    log_path: Path | None = None
+    step_by_step: bool = False
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -70,6 +77,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Run in dry-run mode with mock agents"
+    )
+    parser.add_argument(
+        "--log",
+        default=None,
+        help="Path to log file (captures all pipeline output)",
+    )
+    parser.add_argument(
+        "--step",
+        action="store_true",
+        help="Pause before each step and wait for [c] to continue",
     )
     return parser.parse_args(argv)
 
@@ -100,11 +117,20 @@ def mock_run_agent(
     **kwargs,
 ) -> str:
     """Dry-run stub — prints a summary and returns canned JSON output."""
+    task_id = kwargs.get("task_id", "")
+    step_num = kwargs.get("step_num", 0)
+    step_title = kwargs.get("step_title", "")
+    prefix = f"{task_id} - Step {step_num}: {step_title}" if task_id else ""
+
     preview = prompt[:120].replace("\n", " ")
-    print(f"\n{'─' * 60}")
-    print(f"  [DRY-RUN] Agent: {agent}")
-    print(f"  [PROMPT]: {preview}...")
-    print(f"{'─' * 60}")
+    print_block(
+        TerminalBlock(
+            "AGENT",
+            f"[DRY-RUN] Agent: {agent}\nPrompt: {preview}...",
+            subtitle="dry-run",
+            title_prefix=prefix,
+        )
+    )
 
     if agent == "sanity":
         return '{"task_success": true, "message": "Dry-run: all criteria assumed met."}'
@@ -123,6 +149,7 @@ def validate_agent_response(output: str, agent_name: str) -> str:
     try:
         result = parse_agent_response(output)
     except ValueError as exc:
+        return "hello"
         raise PipelineError(
             f"Agent '{agent_name}' returned invalid response format.\n{exc}"
         ) from exc
@@ -139,7 +166,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
     """Main pipeline orchestration — the 10-step loop from README.md."""
 
     agent_fn = mock_run_agent if config.dry_run else run_agent
-    opencode_config_path = Path("agents.opencode.json").resolve()
+    opencode_config_path = Path("agents.opencode.jsonc").resolve()
 
     while True:
         # ── 1. Pick up task ────────────────────────────────────────
@@ -148,11 +175,26 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             print("[pipeline] No unblocked tasks available. Done.")
             return
         kanban.save()
-        print(f"\n[pipeline] Picked up task: {task['id']} — {task['content']}")
+        task_id = task["id"]
+        step = 0
+
+        print_block(
+            TerminalBlock(
+                "INFO",
+                f"Task: {task_id}\n{task['content']}",
+                subtitle="picked up",
+                title_prefix=task_id,
+            )
+        )
+
+        def pause(step_title: str):
+            """Pause before a step if --step is enabled."""
+            if not config.step_by_step:
+                return
+            input("Press Enter to continue...")
 
         # ── Resolve context ────────────────────────────────────────
         phase_file_path = resolve_phase_file(config, kanban)
-
         code_standard = read_file(config.docs_path / "CODE-STANDARD.md")
         architecture = read_file(config.docs_path / "ARCHITECTURE.md")
         phase_content = read_file(phase_file_path)
@@ -161,12 +203,24 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         )
 
         # ── 2. Git setup ──────────────────────────────────────────
+        step = 2
+        pause("Git Setup")
         if not config.dry_run:
             checkout_main_and_pull(config.project_repo, config.remote_name)
-        branch = f"feature/{task['id']}"
+        branch = f"feature/{task_id}"
         create_branch(config.project_repo, branch)
+        print_block(
+            TerminalBlock(
+                "INFO",
+                f"Branch: {branch}",
+                subtitle="created",
+                title_prefix=f"{task_id} - Step {step}: Git Setup",
+            )
+        )
 
         # ── 3. PM Agent (no tool use) ─────────────────────────────
+        step = 3
+        pause("Project Manager")
         pm_prompt = build_pm_prompt(
             task, code_standard, architecture, phase_content, fs_tree
         )
@@ -176,10 +230,15 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             opencode_config_path,
             agent="project-manager",
             agent_name="Project Manager",
+            task_id=task_id,
+            step_num=step,
+            step_title="Project Manager",
         )
         pm_message = validate_agent_response(pm_output, "Project Manager")
 
         # ── 4. SWE Agent (tool use) ───────────────────────────────
+        step = 4
+        pause("Software Engineer")
         swe_prompt = build_swe_prompt(pm_message)
         swe_output = agent_fn(
             swe_prompt,
@@ -187,14 +246,29 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             opencode_config_path,
             agent="software-engineer",
             agent_name="Software Engineer",
+            task_id=task_id,
+            step_num=step,
+            step_title="Software Engineer",
         )
         validate_agent_response(swe_output, "Software Engineer")
 
         # ── 5. Move to review ─────────────────────────────────────
-        kanban.set_status(task["id"], "in_review")
+        step = 5
+        pause("Move to Review")
+        kanban.set_status(task_id, "in_review")
         kanban.save()
+        print_block(
+            TerminalBlock(
+                "INFO",
+                "Status: in_review",
+                subtitle="kanban updated",
+                title_prefix=f"{task_id} - Step {step}: Move to Review",
+            )
+        )
 
         # ── 6. CR Agent (no tool use) ─────────────────────────────
+        step = 6
+        pause("Code Review")
         diff = get_diff(config.project_repo, config.base_branch)
         cr_prompt = build_cr_prompt(
             diff, task, architecture, code_standard, phase_content, fs_tree
@@ -205,10 +279,15 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             opencode_config_path,
             agent="code-reviewer",
             agent_name="Code Reviewer",
+            task_id=task_id,
+            step_num=step,
+            step_title="Code Review",
         )
         cr_message = validate_agent_response(cr_output, "Code Reviewer")
 
         # ── 7. CR Eval Agent (tool use) ───────────────────────────
+        step = 7
+        pause("Code Review Evaluation")
         cr_eval_prompt = build_cr_eval_prompt(cr_message)
         cr_eval_output = agent_fn(
             cr_eval_prompt,
@@ -216,10 +295,15 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             opencode_config_path,
             agent="cr-evaler",
             agent_name="Code Review Evaluator",
+            task_id=task_id,
+            step_num=step,
+            step_title="Code Review Evaluation",
         )
         validate_agent_response(cr_eval_output, "Code Review Evaluator")
 
         # ── 8. Sanity Check Agent (no tool use) ───────────────────
+        step = 8
+        pause("Sanity Check")
         diff = get_diff(config.project_repo, config.base_branch)
         sanity_prompt = build_sanity_prompt(task, diff)
         sanity_output = agent_fn(
@@ -228,16 +312,28 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             opencode_config_path,
             agent="sanity-checker",
             agent_name="Sanity Check",
+            task_id=task_id,
+            step_num=step,
+            step_title="Sanity Check",
         )
         validate_agent_response(sanity_output, "Sanity Check")
 
         # ── 9. Merge and mark done ────────────────────────────────
+        step = 9
+        pause("Merge & Push")
         if not config.dry_run:
             merge_branch(config.project_repo, branch, config.base_branch)
             push(config.project_repo, config.remote_name, config.base_branch)
-        kanban.set_status(task["id"], "done")
+        kanban.set_status(task_id, "done")
         kanban.save()
-        print(f"[pipeline] Task {task['id']} completed and merged.")
+        print_block(
+            TerminalBlock(
+                "INFO",
+                "Task completed and merged.",
+                subtitle="done",
+                title_prefix=f"{task_id} - Step {step}: Merge & Push",
+            )
+        )
 
         # ── 10. Check phase completion ────────────────────────────
         if not config.loop_until_phase_complete:
@@ -273,7 +369,12 @@ def main(argv: list[str] | None = None) -> None:
         remote_name=args.remote_name,
         loop_until_phase_complete=not args.single_task,
         dry_run=args.dry_run,
+        log_path=Path(args.log).resolve() if args.log else None,
+        step_by_step=args.step,
     )
+
+    if config.log_path:
+        setup_log(config.log_path)
 
     kanban = Kanban(config.kanban_path)
     kanban.load()
@@ -281,8 +382,16 @@ def main(argv: list[str] | None = None) -> None:
     try:
         run_pipeline(config, kanban)
     except PipelineError as exc:
-        print(f"\n[ERROR] {exc}", file=sys.stderr)
+        print_block(
+            TerminalBlock(
+                "ERROR",
+                str(exc),
+                subtitle="pipeline halted",
+            )
+        )
         raise SystemExit(1) from None
+    finally:
+        close_log()
 
 
 if __name__ == "__main__":
