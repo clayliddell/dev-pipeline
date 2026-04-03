@@ -10,6 +10,7 @@ import threading
 
 import tiktoken
 
+from lib.jsonlog import log_json
 from lib.tui import TerminalBlock, print_block
 
 
@@ -22,6 +23,7 @@ SUCCESS_SANITY_CHECK_PROMPT = (
     "Based only on your last response, did the git diff fulfill the exit"
     " criteria? 'yes' or 'no'"
 )
+
 
 @dataclass(slots=True)
 class AgentRunResult:
@@ -72,6 +74,18 @@ def _run_opencode_command(
 ) -> AgentRunResult:
     env = os.environ.copy()
     env["OPENCODE_CONFIG"] = str(opencode_config_path)
+
+    log_json(
+        "opencode.command.start",
+        agent=agent,
+        agent_name=agent_name,
+        task_id=task_id,
+        step_num=step_num,
+        step_title=step_title,
+        command=cmd,
+        project_dir=project_dir,
+        opencode_config_path=opencode_config_path,
+    )
 
     proc = subprocess.Popen(
         cmd,
@@ -127,6 +141,15 @@ def _run_opencode_command(
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                log_json(
+                    "opencode.raw_output",
+                    agent=agent,
+                    agent_name=agent_name,
+                    task_id=task_id,
+                    step_num=step_num,
+                    step_title=step_title,
+                    line=line,
+                )
                 print_block(
                     TerminalBlock(
                         "INFO",
@@ -141,6 +164,18 @@ def _run_opencode_command(
             etype = event.get("type", "")
             part = event.get("part", {})
             text = part.get("text", "")
+
+            log_json(
+                "opencode.event",
+                agent=agent,
+                agent_name=agent_name,
+                task_id=task_id,
+                step_num=step_num,
+                step_title=step_title,
+                session_id=session_id,
+                event_type=etype,
+                raw_event=event,
+            )
 
             if not text:
                 continue
@@ -175,15 +210,46 @@ def _run_opencode_command(
 
     stderr = proc.stderr.read() if proc.stderr else ""
     if stderr:
+        log_json(
+            "opencode.stderr",
+            agent=agent,
+            agent_name=agent_name,
+            task_id=task_id,
+            step_num=step_num,
+            step_title=step_title,
+            session_id=session_id,
+            stderr=stderr,
+        )
         print_block(
             TerminalBlock("INFO", stderr, subtitle="stderr", title_prefix=prefix)
         )
 
     if proc.returncode != 0:
+        log_json(
+            "opencode.exit_error",
+            agent=agent,
+            agent_name=agent_name,
+            task_id=task_id,
+            step_num=step_num,
+            step_title=step_title,
+            session_id=session_id,
+            returncode=proc.returncode,
+            stderr=stderr,
+        )
         raise RuntimeError(
             f"Agent '{agent}' exited with code {proc.returncode}\nstderr: {stderr}"
         )
 
+    log_json(
+        "opencode.command.complete",
+        agent=agent,
+        agent_name=agent_name,
+        task_id=task_id,
+        step_num=step_num,
+        step_title=step_title,
+        session_id=session_id,
+        response_length=len("\n".join(part for part in response_parts if part)),
+    )
     print_block(TerminalBlock("INFO", f"Agent {agent} complete", title_prefix=prefix))
     return AgentRunResult(
         response="\n".join(part for part in response_parts if part),
@@ -233,15 +299,20 @@ def check_agent_success(
     step_title: str = "",
 ) -> AgentRunResult:
     """Ask the same session whether its just-completed task was successful."""
+    prompt = (
+        SUCCESS_SANITY_CHECK_PROMPT
+        if agent_name == "sanity-checker"
+        else SUCCESS_CHECK_PROMPT
+    )
     cmd = _build_opencode_command(
-        SUCCESS_SANITY_CHECK_PROMPT if agent_name == "sanity-checker" else SUCCESS_CHECK_PROMPT,
+        prompt,
         agent=agent,
         session_id=prior_result.session_id,
         continue_last_session=prior_result.session_id is None,
     )
     return _run_opencode_command(
         cmd,
-        SUCCESS_CHECK_PROMPT,
+        prompt,
         project_dir,
         opencode_config_path,
         agent,

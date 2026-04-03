@@ -26,6 +26,7 @@ from lib import (
     build_cr_eval_prompt,
     build_sanity_prompt,
 )
+from lib.jsonlog import close_json_log, log_json, setup_json_log
 from lib.tui import (
     TerminalBlock,
     print_block,
@@ -50,6 +51,7 @@ class PipelineConfig:
     loop_until_phase_complete: bool = True
     dry_run: bool = False
     log_path: Path | None = None
+    json_log_path: Path | None = None
     step_by_step: bool = False
 
 
@@ -86,6 +88,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to log file (captures all pipeline output)",
     )
     parser.add_argument(
+        "--logging-json",
+        default=None,
+        help="Path to JSONL log file (captures pipeline and OpenCode events)",
+    )
+    parser.add_argument(
         "--step",
         action="store_true",
         help="Pause before each step and wait for [c] to continue",
@@ -109,6 +116,10 @@ def resolve_phase_file(config: PipelineConfig, kanban: Kanban) -> Path:
 
 def read_file(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def log_pipeline_event(event: str, **fields) -> None:
+    log_json(f"pipeline.{event}", **fields)
 
 
 def mock_run_agent(
@@ -187,6 +198,18 @@ def ensure_agent_succeeded(
 def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
     """Main pipeline orchestration — the 10-step loop from README.md."""
 
+    log_pipeline_event(
+        "start",
+        project_repo=config.project_repo,
+        kanban_path=config.kanban_path,
+        docs_path=config.docs_path,
+        base_branch=config.base_branch,
+        remote_name=config.remote_name,
+        dry_run=config.dry_run,
+        loop_until_phase_complete=config.loop_until_phase_complete,
+        step_by_step=config.step_by_step,
+    )
+
     agent_fn = mock_run_agent if config.dry_run else run_agent
     success_check_fn = (
         mock_check_agent_success if config.dry_run else check_agent_success
@@ -197,11 +220,18 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         # ── 1. Pick up task ────────────────────────────────────────
         task = kanban.pickup_next()
         if task is None:
+            log_pipeline_event("no_tasks_available")
             print("[pipeline] No unblocked tasks available. Done.")
             return
         kanban.save()
         task_id = task["id"]
         step = 0
+
+        log_pipeline_event(
+            "task.picked_up",
+            task_id=task_id,
+            task=task,
+        )
 
         print_block(
             TerminalBlock(
@@ -220,6 +250,12 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
 
         # ── Resolve context ────────────────────────────────────────
         phase_file_path = resolve_phase_file(config, kanban)
+        log_pipeline_event(
+            "phase.resolved",
+            task_id=task_id,
+            phase=kanban.data["meta"]["current_phase"],
+            phase_file=phase_file_path,
+        )
         code_standard = read_file(config.docs_path / "CODE-STANDARD.md")
         architecture = read_file(config.docs_path / "ARCHITECTURE.md")
         phase_content = read_file(phase_file_path)
@@ -229,11 +265,21 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
 
         # ── 2. Git setup ──────────────────────────────────────────
         step = 2
+        log_pipeline_event(
+            "step.start", task_id=task_id, step_num=step, step_title="Git Setup"
+        )
         pause("Git Setup")
         if not config.dry_run:
             checkout_main_and_pull(config.project_repo, config.remote_name)
         branch = f"feature/{task_id}"
         create_branch(config.project_repo, branch)
+        log_pipeline_event(
+            "branch.created",
+            task_id=task_id,
+            branch=branch,
+            step_num=step,
+            step_title="Git Setup",
+        )
         print_block(
             TerminalBlock(
                 "INFO",
@@ -242,9 +288,19 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
                 title_prefix=f"{task_id} - Step {step}: Git Setup",
             )
         )
+        log_pipeline_event(
+            "step.complete",
+            task_id=task_id,
+            step_num=step,
+            step_title="Git Setup",
+            branch=branch,
+        )
 
         # ── 3. PM Agent (no tool use) ─────────────────────────────
         step = 3
+        log_pipeline_event(
+            "step.start", task_id=task_id, step_num=step, step_title="Project Manager"
+        )
         pause("Project Manager")
         pm_prompt = build_pm_prompt(
             task, code_standard, architecture, phase_content, fs_tree
@@ -270,9 +326,18 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_title="Project Manager",
             success_check_fn=success_check_fn,
         )
+        log_pipeline_event(
+            "step.complete",
+            task_id=task_id,
+            step_num=step,
+            step_title="Project Manager",
+        )
 
         # ── 4. SWE Agent (tool use) ───────────────────────────────
         step = 4
+        log_pipeline_event(
+            "step.start", task_id=task_id, step_num=step, step_title="Software Engineer"
+        )
         pause("Software Engineer")
         swe_prompt = build_swe_prompt(pm_message)
         swe_output = agent_fn(
@@ -296,12 +361,28 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_title="Software Engineer",
             success_check_fn=success_check_fn,
         )
+        log_pipeline_event(
+            "step.complete",
+            task_id=task_id,
+            step_num=step,
+            step_title="Software Engineer",
+        )
 
         # ── 5. Move to review ─────────────────────────────────────
         step = 5
+        log_pipeline_event(
+            "step.start", task_id=task_id, step_num=step, step_title="Move to Review"
+        )
         pause("Move to Review")
         kanban.set_status(task_id, "in_review")
         kanban.save()
+        log_pipeline_event(
+            "status.updated",
+            task_id=task_id,
+            status="in_review",
+            step_num=step,
+            step_title="Move to Review",
+        )
         print_block(
             TerminalBlock(
                 "INFO",
@@ -310,9 +391,15 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
                 title_prefix=f"{task_id} - Step {step}: Move to Review",
             )
         )
+        log_pipeline_event(
+            "step.complete", task_id=task_id, step_num=step, step_title="Move to Review"
+        )
 
         # ── 6. CR Agent (no tool use) ─────────────────────────────
         step = 6
+        log_pipeline_event(
+            "step.start", task_id=task_id, step_num=step, step_title="Code Review"
+        )
         pause("Code Review")
         diff = get_diff(config.project_repo, config.base_branch)
         cr_prompt = build_cr_prompt(
@@ -339,9 +426,18 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_title="Code Review",
             success_check_fn=success_check_fn,
         )
+        log_pipeline_event(
+            "step.complete", task_id=task_id, step_num=step, step_title="Code Review"
+        )
 
         # ── 7. CR Eval Agent (tool use) ───────────────────────────
         step = 7
+        log_pipeline_event(
+            "step.start",
+            task_id=task_id,
+            step_num=step,
+            step_title="Code Review Evaluation",
+        )
         pause("Code Review Evaluation")
         cr_eval_prompt = build_cr_eval_prompt(cr_message)
         cr_eval_output = agent_fn(
@@ -365,9 +461,18 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_title="Code Review Evaluation",
             success_check_fn=success_check_fn,
         )
+        log_pipeline_event(
+            "step.complete",
+            task_id=task_id,
+            step_num=step,
+            step_title="Code Review Evaluation",
+        )
 
         # ── 8. Sanity Check Agent (no tool use) ───────────────────
         step = 8
+        log_pipeline_event(
+            "step.start", task_id=task_id, step_num=step, step_title="Sanity Check"
+        )
         pause("Sanity Check")
         diff = get_diff(config.project_repo, config.base_branch)
         sanity_prompt = build_sanity_prompt(task, diff)
@@ -392,15 +497,28 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_title="Sanity Check",
             success_check_fn=success_check_fn,
         )
+        log_pipeline_event(
+            "step.complete", task_id=task_id, step_num=step, step_title="Sanity Check"
+        )
 
         # ── 9. Merge and mark done ────────────────────────────────
         step = 9
+        log_pipeline_event(
+            "step.start", task_id=task_id, step_num=step, step_title="Merge & Push"
+        )
         pause("Merge & Push")
         if not config.dry_run:
             merge_branch(config.project_repo, branch, config.base_branch)
             push(config.project_repo, config.remote_name, config.base_branch)
         kanban.set_status(task_id, "done")
         kanban.save()
+        log_pipeline_event(
+            "status.updated",
+            task_id=task_id,
+            status="done",
+            step_num=step,
+            step_title="Merge & Push",
+        )
         print_block(
             TerminalBlock(
                 "INFO",
@@ -409,14 +527,19 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
                 title_prefix=f"{task_id} - Step {step}: Merge & Push",
             )
         )
+        log_pipeline_event(
+            "step.complete", task_id=task_id, step_num=step, step_title="Merge & Push"
+        )
 
         # ── 10. Check phase completion ────────────────────────────
         if not config.loop_until_phase_complete:
+            log_pipeline_event("exit.single_task", task_id=task_id)
             print("[pipeline] Single-task mode. Done.")
             return
 
         current_phase = kanban.data["meta"]["current_phase"]
         if kanban.is_phase_complete(current_phase):
+            log_pipeline_event("exit.phase_complete", phase=current_phase)
             print(f"[pipeline] Phase '{current_phase}' is complete. Done.")
             return
 
@@ -445,18 +568,39 @@ def main(argv: list[str] | None = None) -> None:
         loop_until_phase_complete=not args.single_task,
         dry_run=args.dry_run,
         log_path=Path(args.log).resolve() if args.log else None,
+        json_log_path=Path(args.logging_json).expanduser().resolve()
+        if args.logging_json
+        else None,
         step_by_step=args.step,
     )
 
-    if config.log_path:
-        setup_log(config.log_path)
-
-    kanban = Kanban(config.kanban_path)
-    kanban.load()
-
     try:
+        if config.log_path:
+            setup_log(config.log_path)
+        if config.json_log_path:
+            setup_json_log(config.json_log_path)
+
+        kanban = Kanban(config.kanban_path)
+        kanban.load()
+
+        log_pipeline_event(
+            "configured",
+            project_repo=config.project_repo,
+            kanban_path=config.kanban_path,
+            docs_path=config.docs_path,
+            base_branch=config.base_branch,
+            remote_name=config.remote_name,
+            log_path=config.log_path,
+            json_log_path=config.json_log_path,
+        )
+
         run_pipeline(config, kanban)
     except PipelineError as exc:
+        log_pipeline_event(
+            "error",
+            error_type="PipelineError",
+            message=str(exc),
+        )
         print_block(
             TerminalBlock(
                 "ERROR",
@@ -467,6 +611,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(1) from None
     finally:
         close_log()
+        close_json_log()
 
 
 if __name__ == "__main__":

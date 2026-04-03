@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openrouter/stepfun/step-3.5-flash:free",
-  "small_model": "openrouter/stepfun/step-3.5-flash:free",
+  "model": "openrouter/qwen/qwen3.6-plus-preview:free",
+  "small_model": "openrouter/qwen/qwen3.6-plus-preview:free",
   "default_agent": "build",
   "mode": {
     "project-manager": {
