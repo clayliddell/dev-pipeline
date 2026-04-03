@@ -10,14 +10,16 @@ from dataclasses import dataclass
 
 from kanban import Kanban
 from lib import (
+    AgentRunResult,
     checkout_main_and_pull,
+    check_agent_success,
     create_branch,
     get_diff,
     get_file_tree,
     merge_branch,
     push,
     run_agent,
-    parse_agent_response,
+    success_response_found,
     build_pm_prompt,
     build_swe_prompt,
     build_cr_prompt,
@@ -115,8 +117,8 @@ def mock_run_agent(
     opencode_config_path: Path,
     agent: str = "default",
     **kwargs,
-) -> str:
-    """Dry-run stub — prints a summary and returns canned JSON output."""
+) -> AgentRunResult:
+    """Dry-run stub — prints a summary and returns canned agent output."""
     task_id = kwargs.get("task_id", "")
     step_num = kwargs.get("step_num", 0)
     step_title = kwargs.get("step_title", "")
@@ -132,40 +134,63 @@ def mock_run_agent(
         )
     )
 
-    if agent == "sanity":
-        return '{"task_success": true, "message": "Dry-run: all criteria assumed met."}'
-    if agent == "swe":
-        return '{"task_success": true, "message": "Implementation complete."}'
-    if agent == "cr-eval":
-        return '{"task_success": true, "message": "Dry-run: no changes applied."}'
-    return '{"task_success": true, "message": "Dry-run: mock agent completed."}'
+    return AgentRunResult(
+        response="Dry-run: mock agent completed.",
+        session_id=f"dry-run-{agent}",
+    )
 
 
-def validate_agent_response(output: str, agent_name: str) -> str:
-    """Parse agent output, halt pipeline on task_success=false.
+def mock_check_agent_success(
+    project_dir: Path,
+    opencode_config_path: Path,
+    *,
+    agent: str,
+    agent_name: str,
+    prior_result: AgentRunResult,
+    task_id: str = "",
+    step_num: int = 0,
+    step_title: str = "",
+) -> AgentRunResult:
+    return AgentRunResult(response="yes", session_id=prior_result.session_id)
 
-    Returns the message string on success.
-    """
-    try:
-        result = parse_agent_response(output)
-    except ValueError as exc:
-        return "hello"
+
+def ensure_agent_succeeded(
+    project_dir: Path,
+    opencode_config_path: Path,
+    *,
+    agent: str,
+    agent_name: str,
+    result: AgentRunResult,
+    task_id: str,
+    step_num: int,
+    step_title: str,
+    success_check_fn,
+) -> str:
+    success_result = success_check_fn(
+        project_dir,
+        opencode_config_path,
+        agent=agent,
+        agent_name=agent_name,
+        prior_result=result,
+        task_id=task_id,
+        step_num=step_num,
+        step_title=f"{step_title} Success Check",
+    )
+    if not success_response_found(success_result.response):
         raise PipelineError(
-            f"Agent '{agent_name}' returned invalid response format.\n{exc}"
-        ) from exc
-
-    if not result["task_success"]:
-        raise PipelineError(
-            f"Agent '{agent_name}' reported failure: {result['message']}"
+            f"Agent '{agent_name}' did not confirm success.\n"
+            f"Follow-up response was:\n{success_result.response[:500]}"
         )
-
-    return result["message"]
+    return result.response
 
 
 def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
     """Main pipeline orchestration — the 10-step loop from README.md."""
 
     agent_fn = mock_run_agent if config.dry_run else run_agent
+    success_check_fn = (
+        mock_check_agent_success if config.dry_run else check_agent_success
+    )
     opencode_config_path = Path("agents.opencode.jsonc").resolve()
 
     while True:
@@ -234,7 +259,17 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_num=step,
             step_title="Project Manager",
         )
-        pm_message = validate_agent_response(pm_output, "Project Manager")
+        pm_message = ensure_agent_succeeded(
+            config.project_repo,
+            opencode_config_path,
+            agent="project-manager",
+            agent_name="Project Manager",
+            result=pm_output,
+            task_id=task_id,
+            step_num=step,
+            step_title="Project Manager",
+            success_check_fn=success_check_fn,
+        )
 
         # ── 4. SWE Agent (tool use) ───────────────────────────────
         step = 4
@@ -250,7 +285,17 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_num=step,
             step_title="Software Engineer",
         )
-        validate_agent_response(swe_output, "Software Engineer")
+        ensure_agent_succeeded(
+            config.project_repo,
+            opencode_config_path,
+            agent="software-engineer",
+            agent_name="Software Engineer",
+            result=swe_output,
+            task_id=task_id,
+            step_num=step,
+            step_title="Software Engineer",
+            success_check_fn=success_check_fn,
+        )
 
         # ── 5. Move to review ─────────────────────────────────────
         step = 5
@@ -283,7 +328,17 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_num=step,
             step_title="Code Review",
         )
-        cr_message = validate_agent_response(cr_output, "Code Reviewer")
+        cr_message = ensure_agent_succeeded(
+            config.project_repo,
+            opencode_config_path,
+            agent="code-reviewer",
+            agent_name="Code Reviewer",
+            result=cr_output,
+            task_id=task_id,
+            step_num=step,
+            step_title="Code Review",
+            success_check_fn=success_check_fn,
+        )
 
         # ── 7. CR Eval Agent (tool use) ───────────────────────────
         step = 7
@@ -299,7 +354,17 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_num=step,
             step_title="Code Review Evaluation",
         )
-        validate_agent_response(cr_eval_output, "Code Review Evaluator")
+        ensure_agent_succeeded(
+            config.project_repo,
+            opencode_config_path,
+            agent="cr-evaler",
+            agent_name="Code Review Evaluator",
+            result=cr_eval_output,
+            task_id=task_id,
+            step_num=step,
+            step_title="Code Review Evaluation",
+            success_check_fn=success_check_fn,
+        )
 
         # ── 8. Sanity Check Agent (no tool use) ───────────────────
         step = 8
@@ -316,7 +381,17 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_num=step,
             step_title="Sanity Check",
         )
-        validate_agent_response(sanity_output, "Sanity Check")
+        ensure_agent_succeeded(
+            config.project_repo,
+            opencode_config_path,
+            agent="sanity-checker",
+            agent_name="Sanity Check",
+            result=sanity_output,
+            task_id=task_id,
+            step_num=step,
+            step_title="Sanity Check",
+            success_check_fn=success_check_fn,
+        )
 
         # ── 9. Merge and mark done ────────────────────────────────
         step = 9

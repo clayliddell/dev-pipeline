@@ -1,11 +1,5 @@
 """Prompt builders for each agent in the pipeline."""
 
-RESPONSE_FORMAT = """
-IMPORTANT: When you are finished, respond with EXACTLY one JSON object and nothing else:
-{"task_success": true, "message": "..."} if the task completed successfully, or
-{"task_success": false, "message": "..."} if it failed.
-The message should summarize what was done or why it failed."""
-
 
 def build_pm_prompt(
     task: dict,
@@ -48,7 +42,7 @@ Produce a detailed plan that includes:
 3. How each exit criterion will be satisfied
 4. Any risks or dependencies to watch out for
 
-Be specific. Reference real file paths from the filesystem and real rules from the architecture/code standard.{RESPONSE_FORMAT}"""
+Be specific. Reference real file paths from the filesystem and real rules from the architecture/code standard."""
 
 
 def build_swe_prompt(pm_output: str) -> str:
@@ -57,7 +51,7 @@ def build_swe_prompt(pm_output: str) -> str:
 
 ---
 
-Implement the plan exactly as described. When finished, stage and commit all changes with a descriptive commit message. Output "DONE" when complete.{RESPONSE_FORMAT}"""
+Implement the plan exactly as described. When finished, stage and commit all changes with a descriptive commit message. Output "DONE" when complete."""
 
 
 def build_cr_prompt(
@@ -106,7 +100,7 @@ For each issue found, provide:
 2. What the issue is
 3. A concrete fix or suggestion
 
-Group your feedback by severity: critical, major, minor. If the code looks good, say so explicitly.{RESPONSE_FORMAT}"""
+Group your feedback by severity: critical, major, minor. If the code looks good, say so explicitly."""
 
 
 def build_cr_eval_prompt(cr_feedback: str) -> str:
@@ -123,7 +117,7 @@ For each suggestion:
 
 After suggestions are applied, ensure all tests are passing.
 
-When finished, output a summary of what you applied and what you skipped with brief reasoning. Output "DONE" when complete.{RESPONSE_FORMAT}"""
+When finished, output a summary of what you applied and what you skipped with brief reasoning. Output "DONE" when complete."""
 
 
 def build_sanity_prompt(task: dict, git_diff: str) -> str:
@@ -150,4 +144,4 @@ Exit Criteria:
 
 ---
 
-Does the git diff fulfill the exit criteria and not introduce major regressions? Answer with >=75% confidence.{RESPONSE_FORMAT}"""
+Does the git diff fulfill the exit criteria and not introduce major regressions? Answer yes or no with brief reasoning and only answer yes if you are at least 75% confident."""

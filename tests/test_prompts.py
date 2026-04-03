@@ -1,15 +1,18 @@
-"""Unit tests for pipeline.prompts."""
+"""Unit tests for pipeline prompts and agent success helpers."""
+
+from pathlib import Path
 
 import pytest
 
+from lib.agents import AgentRunResult, _build_opencode_command, success_response_found
 from lib.prompts import (
-    build_pm_prompt,
-    build_swe_prompt,
-    build_cr_prompt,
     build_cr_eval_prompt,
+    build_cr_prompt,
+    build_pm_prompt,
     build_sanity_prompt,
+    build_swe_prompt,
 )
-from lib.agents import parse_agent_response
+from pipeline import PipelineError, ensure_agent_succeeded
 
 
 SAMPLE_TASK = {
@@ -68,50 +71,96 @@ class TestBuildCrEvalPrompt:
 
 
 class TestBuildSanityPrompt:
-    def test_contains_json_format_instruction(self):
+    def test_requests_yes_or_no(self):
         p = build_sanity_prompt(SAMPLE_TASK, "some diff")
-        assert '"task_success"' in p
-        assert '"message"' in p
+        assert "Answer yes or no" in p
 
     def test_contains_exit_criteria(self):
         p = build_sanity_prompt(SAMPLE_TASK, "some diff")
         assert "foo works" in p
 
 
-class TestAllPromptsContainJsonFormat:
-    def test_pm_prompt_has_json_format(self):
+class TestPromptsDoNotRequireJson:
+    def test_pm_prompt_has_no_json_contract(self):
         p = build_pm_prompt(SAMPLE_TASK, "std", "arch", "phase", "tree")
-        assert '"task_success"' in p
+        assert '"task_success"' not in p
 
-    def test_swe_prompt_has_json_format(self):
+    def test_swe_prompt_has_no_json_contract(self):
         p = build_swe_prompt("plan")
-        assert '"task_success"' in p
+        assert '"task_success"' not in p
 
-    def test_cr_prompt_has_json_format(self):
+    def test_cr_prompt_has_no_json_contract(self):
         p = build_cr_prompt("diff", SAMPLE_TASK, "arch", "std", "phase", "tree")
-        assert '"task_success"' in p
+        assert '"task_success"' not in p
 
-    def test_cr_eval_prompt_has_json_format(self):
+    def test_cr_eval_prompt_has_no_json_contract(self):
         p = build_cr_eval_prompt("feedback")
-        assert '"task_success"' in p
+        assert '"task_success"' not in p
 
 
-class TestParseAgentResponse:
-    def test_valid_success(self):
-        out = parse_agent_response('{"task_success": true, "message": "All good"}')
-        assert out["task_success"] is True
-        assert out["message"] == "All good"
+class TestSuccessResponseFound:
+    def test_matches_yes_case_insensitively(self):
+        assert success_response_found("Yes") is True
 
-    def test_valid_failure(self):
-        out = parse_agent_response('{"task_success": false, "message": "Broke"}')
-        assert out["task_success"] is False
-        assert out["message"] == "Broke"
+    def test_requires_whole_word(self):
+        assert success_response_found("yesterday") is False
 
-    def test_json_embedded_in_text(self):
-        text = 'Some reasoning here.\n\n{"task_success": true, "message": "Done"}'
-        out = parse_agent_response(text)
-        assert out["task_success"] is True
+    def test_matches_yes_with_extra_text(self):
+        assert success_response_found("yes, the task succeeded") is True
 
-    def test_missing_json_raises(self):
-        with pytest.raises(ValueError, match="valid"):
-            parse_agent_response("no json here")
+
+class TestBuildOpencodeCommand:
+    def test_uses_session_id_when_present(self):
+        cmd = _build_opencode_command(
+            "hello", agent="project-manager", session_id="ses-1"
+        )
+
+        assert "--session" in cmd
+        assert "ses-1" in cmd
+        assert "--continue" not in cmd
+
+    def test_falls_back_to_continue_without_session_id(self):
+        cmd = _build_opencode_command(
+            "hello",
+            agent="project-manager",
+            continue_last_session=True,
+        )
+
+        assert "--continue" in cmd
+
+
+class TestEnsureAgentSucceeded:
+    def test_returns_original_response_when_followup_says_yes(self, tmp_path: Path):
+        def fake_success_check(*args, **kwargs):
+            return AgentRunResult(response="YES", session_id="abc")
+
+        result = ensure_agent_succeeded(
+            tmp_path,
+            tmp_path / "agents.opencode.jsonc",
+            agent="project-manager",
+            agent_name="Project Manager",
+            result=AgentRunResult(response="plan output", session_id="abc"),
+            task_id="task-1",
+            step_num=3,
+            step_title="Project Manager",
+            success_check_fn=fake_success_check,
+        )
+
+        assert result == "plan output"
+
+    def test_raises_when_followup_does_not_say_yes(self, tmp_path: Path):
+        def fake_success_check(*args, **kwargs):
+            return AgentRunResult(response="no", session_id="abc")
+
+        with pytest.raises(PipelineError, match="did not confirm success"):
+            ensure_agent_succeeded(
+                tmp_path,
+                tmp_path / "agents.opencode.jsonc",
+                agent="project-manager",
+                agent_name="Project Manager",
+                result=AgentRunResult(response="plan output", session_id="abc"),
+                task_id="task-1",
+                step_num=3,
+                step_title="Project Manager",
+                success_check_fn=fake_success_check,
+            )

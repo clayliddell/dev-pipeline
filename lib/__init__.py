@@ -12,7 +12,12 @@ from .git import (
     push,
     has_changes,
 )
-from .agents import run_agent, parse_agent_response
+from .agents import (
+    AgentRunResult,
+    check_agent_success,
+    run_agent,
+    success_response_found,
+)
 from .prompts import (
     build_pm_prompt,
     build_swe_prompt,
@@ -30,8 +35,10 @@ __all__ = [
     "merge_branch",
     "push",
     "has_changes",
+    "AgentRunResult",
     "run_agent",
-    "parse_agent_response",
+    "check_agent_success",
+    "success_response_found",
     "build_pm_prompt",
     "build_swe_prompt",
     "build_cr_prompt",
