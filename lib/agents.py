@@ -14,16 +14,32 @@ from lib.jsonlog import log_json
 from lib.tui import TerminalBlock, print_block
 
 
-SUCCESS_CHECK_PROMPT = (
-    "If the task you were asked to perform was completed successfully,"
-    " please respond 'yes'; otherwise, respond 'no'."
-)
-
-SUCCESS_SANITY_CHECK_PROMPT = (
-    "Based only on your last response, did the git diff fulfill the exit"
-    " criteria? 'yes' or 'no'"
-)
-
+SUCCESS_CHECK_PROMPT = {
+    "default": (
+        "Was the agent able to perform the requested task successfully?"
+        " Respond 'yes' or 'no'"
+    ),
+    "project-manager": (
+        "Was the agent able to create an implementation plan?"
+        " Respond 'yes' or 'no'"
+    ),
+    "software-engineer": (
+        "Was the agent able to implement the requested changes?"
+        " Respond 'yes' or 'no'"
+    ),
+    "code-reviewer": (
+        "Did the agent review the code?"
+        " Respond 'yes' or 'no'"
+    ),
+    "cr-evaler": (
+        "Did the agent evaluate the code review?"
+        " Respond 'yes' or 'no'"
+    ),
+    "sanity-checker": (
+        "Did the agent confirm the git diff fulfilled the exit criteria?"
+        " Respond 'yes' or 'no'"
+    ),
+}
 
 @dataclass(slots=True)
 class AgentRunResult:
@@ -299,23 +315,18 @@ def check_agent_success(
     step_title: str = "",
 ) -> AgentRunResult:
     """Ask the same session whether its just-completed task was successful."""
-    prompt = (
-        SUCCESS_SANITY_CHECK_PROMPT
-        if agent_name == "sanity-checker"
-        else SUCCESS_CHECK_PROMPT
-    )
-    cmd = _build_opencode_command(
-        prompt,
-        agent=agent,
-        session_id=prior_result.session_id,
-        continue_last_session=prior_result.session_id is None,
-    )
+    # build prompt
+    prompt = SUCCESS_CHECK_PROMPT.get(
+        agent, SUCCESS_CHECK_PROMPT["default"])
+    prompt += f"\n\nAgent Response:\n{prior_result.response}"
+    # call agent
+    cmd = _build_opencode_command(prompt, agent="success-checker")
     return _run_opencode_command(
         cmd,
         prompt,
         project_dir,
         opencode_config_path,
-        agent,
+        "success-checker",
         f"{agent_name} Success Check",
         task_id,
         step_num,

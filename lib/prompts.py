@@ -42,7 +42,13 @@ Produce a detailed plan that includes:
 3. How each exit criterion will be satisfied
 4. Any risks or dependencies to watch out for
 
-Be specific. Reference real file paths from the filesystem and real rules from the architecture/code standard."""
+Be specific. Reference real file paths from the filesystem and real rules from the architecture/code standard.
+
+IMPORTANT: It is very important that -
+1/ You DO NOT use tool calls to evaluate the project.
+2/ You DO NOT try to implement the plan that you create. You are creating this plan for a Software Engineer coding agent to implement.
+
+Please respond with a detailed implementation plan."""
 
 
 def build_swe_prompt(pm_output: str) -> str:

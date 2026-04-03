@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openrouter/qwen/qwen3.6-plus-preview:free",
-  "small_model": "openrouter/qwen/qwen3.6-plus-preview:free",
+  "model": "opencode/qwen3.6-plus-free",
+  "small_model": "opencode/qwen3.6-plus-free",
   "default_agent": "build",
   "mode": {
     "project-manager": {
@@ -84,6 +84,27 @@
     },
     "sanity-checker": {
       "prompt": "You are a skilled software engineer with experience working on large scale projects in Fortune 500 companies. You value code meeting requirements while being reliable, readable, simple, and secure.",
+      "tools": {
+        "todowrite": true,
+        "todoread": true,
+        "read": false,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "bash": false,
+        "edit": false,
+        "write": false,
+        "applypatch": false,
+        "skill": false,
+        "webfetch": false,
+        "websearch": false,
+        "question": false,
+        "task": false,
+        "codesearch": false
+      }
+    },
+    "success-checker": {
+      "prompt": "You are a skilled Software Architect with experience evaluating the output of a Software Development AI agent team. You're responsible for simply determining whether an AI agent was able to successfully perform it's requested task. You're operating within a long-running pipeline. You want to lean more toward accepting, than rejecting agent output. You should only reject the output if there was an evident, obvious error or failure that should be escalated before the pipeline proceeds.",
       "tools": {
         "todowrite": true,
         "todoread": true,
