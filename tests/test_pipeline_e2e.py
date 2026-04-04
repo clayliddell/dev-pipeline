@@ -27,7 +27,7 @@ class TestDryRunSingleTask:
 
     def test_completes_without_error(self, project_tree):
         config = PipelineConfig(
-            project_repo=project_tree,
+            local_repo_path=project_tree,
             kanban_path=project_tree / "env" / "kanban.json",
             docs_path=project_tree / "docs",
             base_branch="main",
@@ -47,7 +47,7 @@ class TestDryRunSingleTask:
 
     def test_phase_file_resolved(self, project_tree):
         config = PipelineConfig(
-            project_repo=project_tree,
+            local_repo_path=project_tree,
             kanban_path=project_tree / "env" / "kanban.json",
             docs_path=project_tree / "docs",
             base_branch="main",
@@ -78,7 +78,7 @@ class TestDryRunEndToEnd:
 
     def test_loop_exits_when_no_tasks(self, project_tree):
         config = PipelineConfig(
-            project_repo=project_tree,
+            local_repo_path=project_tree,
             kanban_path=project_tree / "env" / "kanban.json",
             docs_path=project_tree / "docs",
             base_branch="main",
@@ -98,7 +98,7 @@ class TestDryRunEndToEnd:
 
     def test_kanban_persists_across_reload(self, project_tree):
         config = PipelineConfig(
-            project_repo=project_tree,
+            local_repo_path=project_tree,
             kanban_path=project_tree / "env" / "kanban.json",
             docs_path=project_tree / "docs",
             base_branch="main",

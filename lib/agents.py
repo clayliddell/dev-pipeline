@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import threading
 
@@ -41,6 +42,8 @@ SUCCESS_CHECK_PROMPT = {
     ),
 }
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
 @dataclass(slots=True)
 class AgentRunResult:
     response: str
@@ -60,8 +63,9 @@ def _build_opencode_command(
     session_id: str | None = None,
     continue_last_session: bool = False,
 ) -> list[str]:
+    opencode_command = "/home/agent/.opencode/bin/opencode"
     cmd = [
-        "opencode",
+        opencode_command,
         "run",
         prompt,
         "--agent",
@@ -77,6 +81,43 @@ def _build_opencode_command(
     return cmd
 
 
+def _remote_opencode_config_path(project_dir: Path, opencode_config_path: Path) -> str:
+    """Map the config path to the matching path inside the remote project dir."""
+    if opencode_config_path.name == opencode_config_path.as_posix():
+        return str(project_dir / opencode_config_path)
+    return str(project_dir / opencode_config_path.name)
+
+
+def _normalize_opencode_fragment(fragment: str) -> str:
+    """Strip PTY control sequences so wrapped JSON can be reassembled."""
+    return ANSI_ESCAPE_RE.sub("", fragment).replace("\r", "")
+
+
+def _build_ssh_remote_command(
+    cmd: list[str], project_dir: Path, opencode_config_path: Path
+) -> str:
+    """Build a shell command for remote execution over SSH."""
+    remote_config = _remote_opencode_config_path(project_dir, opencode_config_path)
+    opencode_cmd = shlex.join(
+        [
+            "env",
+            "TERM=dumb",
+            "COLUMNS=512",
+            "LINES=200",
+            f"OPENCODE_CONFIG={remote_config}",
+            "stdbuf",
+            "-oL",
+            "-eL",
+            *cmd,
+        ]
+    )
+    script_cmd = shlex.join(["script", "-qefc", opencode_cmd, "/dev/null"])
+    return (
+        f"cd {shlex.quote(str(project_dir))} && "
+        f"if command -v script >/dev/null 2>&1; then {script_cmd}; else {opencode_cmd}; fi"
+    )
+
+
 def _run_opencode_command(
     cmd: list[str],
     prompt: str,
@@ -87,6 +128,7 @@ def _run_opencode_command(
     task_id: str,
     step_num: int,
     step_title: str,
+    ssh_host: str | None,
 ) -> AgentRunResult:
     env = os.environ.copy()
     env["OPENCODE_CONFIG"] = str(opencode_config_path)
@@ -103,14 +145,23 @@ def _run_opencode_command(
         opencode_config_path=opencode_config_path,
     )
 
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(project_dir),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
+    if ssh_host:
+        ssh_cmd = _build_ssh_remote_command(cmd, project_dir, opencode_config_path)
+        proc = subprocess.Popen(
+            ["ssh", "-T", "-n", ssh_host, "bash", "-lc", ssh_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    else:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
 
     response_parts: list[str] = []
     session_id: str | None = None
@@ -139,6 +190,7 @@ def _run_opencode_command(
 
         current_type = None
         buffered_parts: list[str] = []
+        pending_json = ""
 
         def flush_buffer() -> None:
             nonlocal current_type, buffered_parts
@@ -149,32 +201,42 @@ def _run_opencode_command(
             current_type = None
             buffered_parts = []
 
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
+        def emit_raw_output(line: str) -> None:
+            log_json(
+                "opencode.raw_output",
+                agent=agent,
+                agent_name=agent_name,
+                task_id=task_id,
+                step_num=step_num,
+                step_title=step_title,
+                line=line,
+            )
+            print_block(
+                TerminalBlock(
+                    "INFO",
+                    line,
+                    subtitle="raw output",
+                    title_prefix=prefix,
+                )
+            )
+
+        for fragment in proc.stdout:
+            fragment = _normalize_opencode_fragment(fragment)
+            if not fragment.strip():
                 continue
 
+            pending_json += fragment.strip("\n")
+
             try:
-                event = json.loads(line)
+                event = json.loads(pending_json)
             except json.JSONDecodeError:
-                log_json(
-                    "opencode.raw_output",
-                    agent=agent,
-                    agent_name=agent_name,
-                    task_id=task_id,
-                    step_num=step_num,
-                    step_title=step_title,
-                    line=line,
-                )
-                print_block(
-                    TerminalBlock(
-                        "INFO",
-                        line,
-                        subtitle="raw output",
-                        title_prefix=prefix,
-                    )
-                )
+                if pending_json.lstrip().startswith("{"):
+                    continue
+                emit_raw_output(pending_json.strip())
+                pending_json = ""
                 continue
+
+            pending_json = ""
 
             session_id = event.get("sessionID") or session_id
             etype = event.get("type", "")
@@ -215,6 +277,9 @@ def _run_opencode_command(
             print_block(
                 TerminalBlock("INFO", text, subtitle=etype, title_prefix=prefix)
             )
+
+        if pending_json.strip():
+            emit_raw_output(pending_json.strip())
 
         flush_buffer()
 
@@ -282,6 +347,7 @@ def run_agent(
     task_id: str = "",
     step_num: int = 0,
     step_title: str = "",
+    ssh_host: str | None = None,
 ) -> AgentRunResult:
     """Run an opencode agent and print block output."""
     cmd = _build_opencode_command(prompt, agent=agent)
@@ -295,6 +361,7 @@ def run_agent(
         task_id,
         step_num,
         step_title,
+        ssh_host,
     )
 
 
@@ -313,6 +380,7 @@ def check_agent_success(
     task_id: str = "",
     step_num: int = 0,
     step_title: str = "",
+    ssh_host: str | None = None,
 ) -> AgentRunResult:
     """Ask the same session whether its just-completed task was successful."""
     # build prompt
@@ -331,4 +399,5 @@ def check_agent_success(
         task_id,
         step_num,
         step_title,
+        ssh_host,
     )

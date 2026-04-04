@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
+import subprocess
 
 from dataclasses import dataclass
 
@@ -41,7 +41,7 @@ class PipelineError(Exception):
 
 @dataclass(slots=True)
 class PipelineConfig:
-    project_repo: Path
+    local_repo_path: Path
     kanban_path: Path
     docs_path: Path
     base_branch: str = "main"
@@ -53,24 +53,26 @@ class PipelineConfig:
     log_path: Path | None = None
     json_log_path: Path | None = None
     step_by_step: bool = False
+    ssh_host: str | None = None
+    ssh_repo_path: Path | None = None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the dev-pipeline")
     parser.add_argument(
-        "--project-repo",
-        default=os.path.expanduser("~/dev/agentvm"),
+        "--local-repo-path",
+        required=True,
         help="Path to the project git repository",
     )
     parser.add_argument(
         "--kanban-path",
         default=None,
-        help="Path to kanban.json (default: <project-repo>/env/kanban.json)",
+        help="Path to kanban.json (default: <local-repo-path>/env/kanban.json)",
     )
     parser.add_argument(
         "--docs-path",
         default=None,
-        help="Path to the project documents folder (default: <project-repo>/docs)",
+        help="Path to the project documents folder (default: <local-repo-path>/docs)",
     )
     parser.add_argument("--base-branch", default="main")
     parser.add_argument("--remote-name", default="origin")
@@ -97,8 +99,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Pause before each step and wait for [c] to continue",
     )
-    return parser.parse_args(argv)
-
+    parser.add_argument(
+        "--ssh-host",
+        default=None,
+        help="ssh host name you want to run opencode commands on",
+    )
+    parser.add_argument(
+        "--ssh-repo-path",
+        default=None,
+        help="Path to the project git repository",
+    )
+    args = parser.parse_args(argv)
+    # check conditional args
+    if args.ssh_host and not args.ssh_repo_path:
+        parser.error("ssh_repo_path required when ssh_host flag is used")
+    if args.ssh_repo_path and not args.ssh_host:
+        parser.error("ssh_host required when ssh_repo_path flag is used")
+    return args
 
 def resolve_phase_file(config: PipelineConfig, kanban: Kanban) -> Path:
     """Map kanban meta.current_phase (e.g. 'phase-1') to docs/phases/PHASE-1.md."""
@@ -161,6 +178,7 @@ def mock_check_agent_success(
     task_id: str = "",
     step_num: int = 0,
     step_title: str = "",
+    ssh_host: str | None = None,
 ) -> AgentRunResult:
     return AgentRunResult(response="yes", session_id=prior_result.session_id)
 
@@ -176,6 +194,7 @@ def ensure_agent_succeeded(
     step_num: int,
     step_title: str,
     success_check_fn,
+    ssh_host: str | None = None,
 ) -> str:
     success_result = success_check_fn(
         project_dir,
@@ -186,6 +205,7 @@ def ensure_agent_succeeded(
         task_id=task_id,
         step_num=step_num,
         step_title=f"{step_title} Success Check",
+        ssh_host=ssh_host,
     )
     if not success_response_found(success_result.response):
         raise PipelineError(
@@ -200,7 +220,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
 
     log_pipeline_event(
         "start",
-        project_repo=config.project_repo,
+        local_repo_path=config.local_repo_path,
         kanban_path=config.kanban_path,
         docs_path=config.docs_path,
         base_branch=config.base_branch,
@@ -208,12 +228,18 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         dry_run=config.dry_run,
         loop_until_phase_complete=config.loop_until_phase_complete,
         step_by_step=config.step_by_step,
+        ssh_host=config.ssh_host,
+        ssh_repo_path=config.ssh_repo_path,
     )
 
     agent_fn = mock_run_agent if config.dry_run else run_agent
     success_check_fn = (
         mock_check_agent_success if config.dry_run else check_agent_success
     )
+    # local path to perform git commands on
+    git_repo_path = config.local_repo_path
+    # project path to perform all other commands on
+    project_repo_path = config.ssh_repo_path or config.local_repo_path
     opencode_config_path = Path("agents.opencode.jsonc").resolve()
 
     while True:
@@ -260,7 +286,9 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         architecture = read_file(config.docs_path / "ARCHITECTURE.md")
         phase_content = read_file(phase_file_path)
         fs_tree = get_file_tree(
-            config.project_repo, config.max_tree_depth, config.max_tree_entries
+            config.local_repo_path,
+            config.max_tree_depth,
+            config.max_tree_entries,
         )
 
         # ── 2. Git setup ──────────────────────────────────────────
@@ -270,9 +298,9 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         )
         pause("Git Setup")
         if not config.dry_run:
-            checkout_main_and_pull(config.project_repo, config.remote_name)
+            checkout_main_and_pull(git_repo_path, config.remote_name)
         branch = f"feature/{task_id}"
-        create_branch(config.project_repo, branch)
+        create_branch(git_repo_path, branch)
         log_pipeline_event(
             "branch.created",
             task_id=task_id,
@@ -307,16 +335,17 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         )
         pm_output = agent_fn(
             pm_prompt,
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="project-manager",
             agent_name="Project Manager",
             task_id=task_id,
             step_num=step,
             step_title="Project Manager",
+            ssh_host=config.ssh_host,
         )
         pm_message = ensure_agent_succeeded(
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="project-manager",
             agent_name="Project Manager",
@@ -324,6 +353,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             task_id=task_id,
             step_num=step,
             step_title="Project Manager",
+            ssh_host=config.ssh_host,
             success_check_fn=success_check_fn,
         )
         log_pipeline_event(
@@ -342,16 +372,17 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         swe_prompt = build_swe_prompt(pm_message)
         swe_output = agent_fn(
             swe_prompt,
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="software-engineer",
             agent_name="Software Engineer",
             task_id=task_id,
             step_num=step,
             step_title="Software Engineer",
+            ssh_host=config.ssh_host,
         )
         ensure_agent_succeeded(
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="software-engineer",
             agent_name="Software Engineer",
@@ -359,6 +390,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             task_id=task_id,
             step_num=step,
             step_title="Software Engineer",
+            ssh_host=config.ssh_host,
             success_check_fn=success_check_fn,
         )
         log_pipeline_event(
@@ -401,22 +433,23 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             "step.start", task_id=task_id, step_num=step, step_title="Code Review"
         )
         pause("Code Review")
-        diff = get_diff(config.project_repo, config.base_branch)
+        diff = get_diff(git_repo_path, config.base_branch)
         cr_prompt = build_cr_prompt(
             diff, task, architecture, code_standard, phase_content, fs_tree
         )
         cr_output = agent_fn(
             cr_prompt,
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="code-reviewer",
             agent_name="Code Reviewer",
             task_id=task_id,
             step_num=step,
             step_title="Code Review",
+            ssh_host=config.ssh_host,
         )
         cr_message = ensure_agent_succeeded(
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="code-reviewer",
             agent_name="Code Reviewer",
@@ -424,6 +457,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             task_id=task_id,
             step_num=step,
             step_title="Code Review",
+            ssh_host=config.ssh_host,
             success_check_fn=success_check_fn,
         )
         log_pipeline_event(
@@ -442,16 +476,17 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         cr_eval_prompt = build_cr_eval_prompt(cr_message)
         cr_eval_output = agent_fn(
             cr_eval_prompt,
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="cr-evaler",
             agent_name="Code Review Evaluator",
             task_id=task_id,
             step_num=step,
             step_title="Code Review Evaluation",
+            ssh_host=config.ssh_host,
         )
         ensure_agent_succeeded(
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="cr-evaler",
             agent_name="Code Review Evaluator",
@@ -459,6 +494,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             task_id=task_id,
             step_num=step,
             step_title="Code Review Evaluation",
+            ssh_host=config.ssh_host,
             success_check_fn=success_check_fn,
         )
         log_pipeline_event(
@@ -474,20 +510,21 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             "step.start", task_id=task_id, step_num=step, step_title="Sanity Check"
         )
         pause("Sanity Check")
-        diff = get_diff(config.project_repo, config.base_branch)
+        diff = get_diff(git_repo_path, config.base_branch)
         sanity_prompt = build_sanity_prompt(task, diff)
         sanity_output = agent_fn(
             sanity_prompt,
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="sanity-checker",
             agent_name="Sanity Check",
             task_id=task_id,
             step_num=step,
             step_title="Sanity Check",
+            ssh_host=config.ssh_host,
         )
         ensure_agent_succeeded(
-            config.project_repo,
+            project_repo_path,
             opencode_config_path,
             agent="sanity-checker",
             agent_name="Sanity Check",
@@ -495,6 +532,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             task_id=task_id,
             step_num=step,
             step_title="Sanity Check",
+            ssh_host=config.ssh_host,
             success_check_fn=success_check_fn,
         )
         log_pipeline_event(
@@ -508,8 +546,8 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         )
         pause("Merge & Push")
         if not config.dry_run:
-            merge_branch(config.project_repo, branch, config.base_branch)
-            push(config.project_repo, config.remote_name, config.base_branch)
+            merge_branch(git_repo_path, branch, config.base_branch)
+            push(git_repo_path, config.remote_name, config.base_branch)
         kanban.set_status(task_id, "done")
         kanban.save()
         log_pipeline_event(
@@ -547,20 +585,28 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    project_repo = Path(args.project_repo).expanduser().resolve()
+    local_repo_path = Path(args.local_repo_path).expanduser().resolve()
     kanban_path = (
         Path(args.kanban_path).expanduser().resolve()
         if args.kanban_path
-        else project_repo / "env" / "kanban.json"
+        else local_repo_path / "env" / "kanban.json"
     )
     docs_path = (
         Path(args.docs_path).expanduser().resolve()
         if args.docs_path
-        else project_repo / "docs"
+        else local_repo_path / "docs"
     )
 
+    ssh_repo_path = subprocess.run(
+        ["ssh", args.ssh_host, "readlink", "-e", args.ssh_repo_path],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ssh_repo_path = ssh_repo_path.stdout.strip("\r\n")
+
     config = PipelineConfig(
-        project_repo=project_repo,
+        local_repo_path=local_repo_path,
         docs_path=docs_path,
         kanban_path=kanban_path,
         base_branch=args.base_branch,
@@ -572,6 +618,8 @@ def main(argv: list[str] | None = None) -> None:
         if args.logging_json
         else None,
         step_by_step=args.step,
+        ssh_host=args.ssh_host,
+        ssh_repo_path=Path(ssh_repo_path),
     )
 
     try:
@@ -585,7 +633,9 @@ def main(argv: list[str] | None = None) -> None:
 
         log_pipeline_event(
             "configured",
-            project_repo=config.project_repo,
+            local_repo_path=config.local_repo_path,
+            ssh_host=config.ssh_host,
+            ssh_repo_path=config.ssh_repo_path,
             kanban_path=config.kanban_path,
             docs_path=config.docs_path,
             base_branch=config.base_branch,

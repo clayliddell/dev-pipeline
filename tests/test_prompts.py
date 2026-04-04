@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from lib.agents import AgentRunResult, _build_opencode_command, success_response_found
+from lib.agents import (
+    AgentRunResult,
+    _build_ssh_remote_command,
+    _build_opencode_command,
+    _normalize_opencode_fragment,
+    _remote_opencode_config_path,
+    success_response_found,
+)
 from lib.prompts import (
     build_cr_eval_prompt,
     build_cr_prompt,
@@ -110,6 +117,12 @@ class TestSuccessResponseFound:
 
 
 class TestBuildOpencodeCommand:
+    def test_preserves_prompt_text_without_shell_quoting(self):
+        prompt = "hello 'quoted' world"
+        cmd = _build_opencode_command(prompt, agent="project-manager")
+
+        assert cmd[2] == prompt
+
     def test_uses_session_id_when_present(self):
         cmd = _build_opencode_command(
             "hello", agent="project-manager", session_id="ses-1"
@@ -127,6 +140,40 @@ class TestBuildOpencodeCommand:
         )
 
         assert "--continue" in cmd
+
+
+class TestRemoteOpencodeConfigPath:
+    def test_maps_config_file_into_remote_project_dir(self):
+        remote_path = _remote_opencode_config_path(
+            Path("/remote/repo"), Path("/local/repo/agents.opencode.jsonc")
+        )
+
+        assert remote_path == "/remote/repo/agents.opencode.jsonc"
+
+
+class TestNormalizeOpencodeFragment:
+    def test_strips_ansi_and_carriage_returns(self):
+        fragment = '\x1b[31m{"type":"text","part":{"text":"hi"}}\r\n'
+
+        assert _normalize_opencode_fragment(fragment) == '{"type":"text","part":{"text":"hi"}}\n'
+
+
+class TestBuildSshRemoteCommand:
+    def test_quotes_project_dir_and_wraps_opencode_with_script(self):
+        ssh_cmd = _build_ssh_remote_command(
+            ["/home/agent/.opencode/bin/opencode", "run", "prompt text", "--format", "json"],
+            Path("/remote/repo with spaces"),
+            Path("/tmp/local/agents.opencode.jsonc"),
+        )
+
+        assert ssh_cmd.startswith("cd '/remote/repo with spaces' && if command -v script >/dev/null 2>&1; then ")
+        assert "script -qefc" in ssh_cmd
+        assert "TERM=dumb" in ssh_cmd
+        assert "COLUMNS=512" in ssh_cmd
+        assert "LINES=200" in ssh_cmd
+        assert "OPENCODE_CONFIG=" in ssh_cmd
+        assert "agents.opencode.jsonc" in ssh_cmd
+        assert "/home/agent/.opencode/bin/opencode run 'prompt text' --format json" in ssh_cmd
 
 
 class TestEnsureAgentSucceeded:
