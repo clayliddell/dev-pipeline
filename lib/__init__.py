@@ -1,15 +1,15 @@
 """Pipeline lib package."""
 
 from .git import (
-    checkout_main_and_pull,
-    create_branch,
+    rebase_base,
+    create_or_checkout_branch,
     current_branch,
-    delete_branch,
     commit_uncommitted_changes,
     get_diff,
     get_file_tree,
     stage_and_commit,
     merge_branch,
+    fetch_or_pull_base,
     push,
     has_changes,
 )
@@ -28,8 +28,7 @@ from .prompts import (
 )
 
 __all__ = [
-    "checkout_main_and_pull",
-    "create_branch",
+    "create_or_checkout_branch",
     "get_diff",
     "get_file_tree",
     "stage_and_commit",

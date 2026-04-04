@@ -4,6 +4,10 @@ from pathlib import Path
 import subprocess
 
 
+class GitRebaseError(Exception):
+    pass
+
+
 def _run(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         args,
@@ -14,9 +18,74 @@ def _run(args: list[str], cwd: Path, check: bool = True) -> subprocess.Completed
     )
 
 
-def checkout_main_and_pull(repo: Path, remote: str = "origin") -> None:
-    _run(["git", "checkout", "main"], repo)
-    _run(["git", "pull", remote, "main"], repo)
+def _current_head(repo: Path) -> str:
+    result = _run(["git", "rev-parse", "HEAD"], repo)
+    return result.stdout.strip()
+
+
+def _stash_worktree(repo: Path) -> str:
+    _run(["git", "stash", "push", "-u", "-m", "dev-pipeline auto-stash"], repo)
+    return "stash@{0}"
+
+
+def _restore_worktree(repo: Path, head: str) -> None:
+    _run(["git", "reset", "--hard", head], repo)
+    _run(["git", "clean", "-fd"], repo)
+
+
+def _apply_stash(repo: Path, stash_ref: str) -> None:
+    _run(["git", "stash", "apply", "--index", stash_ref], repo)
+
+
+def fetch_or_pull_base(
+    repo: Path,
+    remote: str = "origin",
+    base_branch: str = "main",
+) -> None:
+    if current_branch(repo) == base_branch:
+        _run(["git", "pull", remote, base_branch], repo)
+    else:
+        _run(["git", "fetch", remote, f"{base_branch}:{base_branch}"], repo)
+
+
+def rebase_base(
+    repo: Path,
+    base_branch: str = "main",
+) -> None:
+    has_uncommitted_changes = has_changes(repo)
+    original_head = _current_head(repo)
+    stash_ref: str | None = None
+
+    if has_uncommitted_changes:
+        stash_ref = _stash_worktree(repo)
+
+    curr_branch = current_branch(repo)
+
+    try:
+        _run(["git", "rebase", base_branch], repo)
+    except subprocess.CalledProcessError:
+        _run(["git", "rebase", "--abort"], repo, check=False)
+        if stash_ref:
+            _apply_stash(repo, stash_ref)
+            _run(["git", "stash", "drop", stash_ref], repo)
+        raise GitRebaseError(
+            f'Unable to rebase "{base_branch}" due to conflicts with committed changes on {curr_branch}.'
+        ) from None
+
+    if not stash_ref:
+        return
+
+    try:
+        _apply_stash(repo, stash_ref)
+    except subprocess.CalledProcessError:
+        _restore_worktree(repo, original_head)
+        _apply_stash(repo, stash_ref)
+        _run(["git", "stash", "drop", stash_ref], repo)
+        raise GitRebaseError(
+            f'Unable to rebase changes from "{base_branch}" due to conflicts with uncommitted changes on {curr_branch}.'
+        ) from None
+
+    _run(["git", "stash", "drop", stash_ref], repo)
 
 
 def branch_exists(repo: Path, branch_name: str) -> bool:
@@ -29,16 +98,11 @@ def current_branch(repo: Path) -> str:
     return result.stdout.strip()
 
 
-def delete_branch(repo: Path, branch_name: str) -> None:
-    if current_branch(repo) == branch_name:
-        _run(["git", "checkout", "main"], repo)
-    _run(["git", "branch", "-D", branch_name], repo)
-
-
-def create_branch(repo: Path, branch_name: str) -> None:
-    if branch_exists(repo, branch_name):
-        delete_branch(repo, branch_name)
-    _run(["git", "checkout", "-b", branch_name], repo)
+def create_or_checkout_branch(repo: Path, branch: str, source_branch: str) -> None:
+    if branch_exists(repo, branch):
+        _run(["git", "checkout", branch], repo)
+    else:
+        _run(["git", "checkout", "-b", branch, source_branch], repo)
 
 
 def get_diff(repo: Path, base: str = "main") -> str:

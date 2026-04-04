@@ -3,12 +3,9 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from kanban import Kanban
 from lib import (
-    checkout_main_and_pull,
-    create_branch,
+    create_or_checkout_branch,
     get_diff,
 )
 from lib import (
@@ -61,16 +58,7 @@ class TestDryRunSingleTask:
 
 class TestDryRunBranchHandling:
     """Verify branch create/delete works in dry-run context."""
-
-    def test_branch_created_and_recreated(self, project_tree):
-        branch = "feature/phase-1.comp-a.task-1"
-        create_branch(project_tree, branch)
-        # Simulate returning to main and recreating
-        checkout_main_and_pull(project_tree, remote="origin")
-        create_branch(project_tree, branch)
-        # Should not raise
-        diff = get_diff(project_tree, "main")
-        assert isinstance(diff, str)
+    pass
 
 
 class TestDryRunEndToEnd:

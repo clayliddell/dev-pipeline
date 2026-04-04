@@ -11,14 +11,17 @@ from dataclasses import dataclass
 from kanban import Kanban
 from lib import (
     AgentRunResult,
-    checkout_main_and_pull,
+    current_branch,
+    has_changes,
     check_agent_success,
     commit_uncommitted_changes,
-    create_branch,
+    create_or_checkout_branch,
     get_diff,
     get_file_tree,
     merge_branch,
+    fetch_or_pull_base,
     push,
+    rebase_base,
     run_agent,
     success_response_found,
     build_pm_prompt,
@@ -45,9 +48,9 @@ class PipelineConfig:
     local_repo_path: Path
     kanban_path: Path
     docs_path: Path
-    base_branch: str
-    remote_name: str
-    opencode_config_path: Path
+    base_branch: str = "main"
+    remote_name: str = "origin"
+    opencode_config_path: Path = Path("opencode.json")
     max_tree_depth: int = 4
     max_tree_entries: int = 200
     loop_until_phase_complete: bool = True
@@ -80,12 +83,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--base-branch",
         default="main",
-        help="Upstream branch to use when changes are pushed."
+        help="Upstream branch to use when changes are pushed. (default: main)"
     )
     parser.add_argument(
         "--remote-name",
         default="origin",
-        help="Upstream remote to use when changes are pushed."
+        help="Upstream remote to use when changes are pushed. (default: origin)"
     )
     parser.add_argument(
         "--single-task",
@@ -326,21 +329,37 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             "step.start", task_id=task_id, step_num=step, step_title="Git Setup"
         )
         pause("Git Setup")
+        feature_branch = f"feature/{task_id}"
+        curr_branch = current_branch(git_repo_path)
         if not config.dry_run:
-            checkout_main_and_pull(git_repo_path, config.remote_name)
-        branch = f"feature/{task_id}"
-        create_branch(git_repo_path, branch)
+            # if were on a feature branch with uncommitted changes, and it's not the feature
+            # we're currently working on, then raise a PipelineError
+            if has_changes(git_repo_path) and curr_branch != feature_branch:
+                raise PipelineError(
+                    f"Uncommited changes on current feature branch '{curr_branch}' and "
+                    f"current feature branch not matching current kanban task '{task_id}'."
+                ) from None
+            fetch_or_pull_base(
+                git_repo_path, config.remote_name, config.base_branch
+            )
+
+        if curr_branch != feature_branch:
+            create_or_checkout_branch(git_repo_path, feature_branch, config.base_branch)
+
+        if not config.dry_run:
+            rebase_base(git_repo_path, config.base_branch)
+
         log_pipeline_event(
             "branch.created",
             task_id=task_id,
-            branch=branch,
+            branch=feature_branch,
             step_num=step,
             step_title="Git Setup",
         )
         print_block(
             TerminalBlock(
                 "INFO",
-                f"Branch: {branch}",
+                f"Branch: {feature_branch}",
                 subtitle="created",
                 title_prefix=f"{task_id} - Step {step}: Git Setup",
             )
@@ -350,7 +369,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             task_id=task_id,
             step_num=step,
             step_title="Git Setup",
-            branch=branch,
+            branch=feature_branch,
         )
 
         # ── 3. PM Agent (no tool use) ─────────────────────────────
@@ -579,7 +598,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
         pause("Commit, Merge & Push")
         if not config.dry_run:
             commit_uncommitted_changes(git_repo_path, task["content"])
-            merge_branch(git_repo_path, branch, config.base_branch)
+            merge_branch(git_repo_path, feature_branch, config.base_branch)
             push(git_repo_path, config.remote_name, config.base_branch)
         kanban.set_status(task_id, "done")
         kanban.save()
