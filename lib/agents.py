@@ -80,14 +80,6 @@ def _build_opencode_command(
         cmd.append("--continue")
     return cmd
 
-
-def _remote_opencode_config_path(project_dir: Path, opencode_config_path: Path) -> str:
-    """Map the config path to the matching path inside the remote project dir."""
-    if opencode_config_path.name == opencode_config_path.as_posix():
-        return str(project_dir / opencode_config_path)
-    return str(project_dir / opencode_config_path.name)
-
-
 def _normalize_opencode_fragment(fragment: str) -> str:
     """Strip PTY control sequences so wrapped JSON can be reassembled."""
     return ANSI_ESCAPE_RE.sub("", fragment).replace("\r", "")
@@ -97,25 +89,20 @@ def _build_ssh_remote_command(
     cmd: list[str], project_dir: Path, opencode_config_path: Path
 ) -> str:
     """Build a shell command for remote execution over SSH."""
-    remote_config = _remote_opencode_config_path(project_dir, opencode_config_path)
     opencode_cmd = shlex.join(
         [
             "env",
             "TERM=dumb",
             "COLUMNS=512",
             "LINES=200",
-            f"OPENCODE_CONFIG={remote_config}",
+            f"OPENCODE_CONFIG={opencode_config_path}",
             "stdbuf",
             "-oL",
             "-eL",
             *cmd,
         ]
     )
-    script_cmd = shlex.join(["script", "-qefc", opencode_cmd, "/dev/null"])
-    return (
-        f"cd {shlex.quote(str(project_dir))} && "
-        f"if command -v script >/dev/null 2>&1; then {script_cmd}; else {opencode_cmd}; fi"
-    )
+    return f"cd {shlex.quote(str(project_dir))} && {opencode_cmd}"
 
 
 def _run_opencode_command(
@@ -130,8 +117,6 @@ def _run_opencode_command(
     step_title: str,
     ssh_host: str | None,
 ) -> AgentRunResult:
-    env = os.environ.copy()
-    env["OPENCODE_CONFIG"] = str(opencode_config_path)
 
     log_json(
         "opencode.command.start",
@@ -147,13 +132,16 @@ def _run_opencode_command(
 
     if ssh_host:
         ssh_cmd = _build_ssh_remote_command(cmd, project_dir, opencode_config_path)
+        final_cmd = f"bash -c {shlex.quote(ssh_cmd)}"
         proc = subprocess.Popen(
-            ["ssh", "-T", "-n", ssh_host, "bash", "-lc", ssh_cmd],
+            ["ssh", "-T", "-n", ssh_host, final_cmd],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
     else:
+        env = os.environ.copy()
+        env["OPENCODE_CONFIG"] = str(opencode_config_path)
         proc = subprocess.Popen(
             cmd,
             cwd=str(project_dir),
