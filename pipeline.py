@@ -13,6 +13,7 @@ from lib import (
     AgentRunResult,
     checkout_main_and_pull,
     check_agent_success,
+    commit_uncommitted_changes,
     create_branch,
     get_diff,
     get_file_tree,
@@ -539,13 +540,17 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             "step.complete", task_id=task_id, step_num=step, step_title="Sanity Check"
         )
 
-        # ── 9. Merge and mark done ────────────────────────────────
+        # ── 9. Commit, merge and mark done ────────────────────────
         step = 9
         log_pipeline_event(
-            "step.start", task_id=task_id, step_num=step, step_title="Merge & Push"
+            "step.start",
+            task_id=task_id,
+            step_num=step,
+            step_title="Commit, Merge & Push",
         )
-        pause("Merge & Push")
+        pause("Commit, Merge & Push")
         if not config.dry_run:
+            commit_uncommitted_changes(git_repo_path, task["content"])
             merge_branch(git_repo_path, branch, config.base_branch)
             push(git_repo_path, config.remote_name, config.base_branch)
         kanban.set_status(task_id, "done")
@@ -555,18 +560,21 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             task_id=task_id,
             status="done",
             step_num=step,
-            step_title="Merge & Push",
+            step_title="Commit, Merge & Push",
         )
         print_block(
             TerminalBlock(
                 "INFO",
                 "Task completed and merged.",
                 subtitle="done",
-                title_prefix=f"{task_id} - Step {step}: Merge & Push",
+                title_prefix=f"{task_id} - Step {step}: Commit, Merge & Push",
             )
         )
         log_pipeline_event(
-            "step.complete", task_id=task_id, step_num=step, step_title="Merge & Push"
+            "step.complete",
+            task_id=task_id,
+            step_num=step,
+            step_title="Commit, Merge & Push",
         )
 
         # ── 10. Check phase completion ────────────────────────────

@@ -1,5 +1,6 @@
 """Unit tests for pipeline.git."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from lib.git import (
     branch_exists,
     delete_branch,
     create_branch,
+    commit_uncommitted_changes,
     get_diff,
     get_file_tree,
     stage_and_commit,
@@ -74,6 +76,31 @@ class TestStageAndCommit:
         stage_and_commit(git_repo, "add new.txt")
         result = has_changes(git_repo)
         assert result is False
+
+
+class TestCommitUncommittedChanges:
+    def test_commits_dirty_repo_with_message(self, git_repo):
+        (git_repo / "dirty.txt").write_text("wip")
+
+        committed = commit_uncommitted_changes(git_repo, "kanban task title")
+
+        assert committed is True
+        assert has_changes(git_repo) is False
+
+        result = subprocess.run(
+            ["git", "log", "-1", "--pretty=%s"],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert result.stdout.strip() == "kanban task title"
+
+    def test_noop_on_clean_repo(self, git_repo):
+        committed = commit_uncommitted_changes(git_repo, "kanban task title")
+
+        assert committed is False
+        assert has_changes(git_repo) is False
 
 
 class TestHasChanges:

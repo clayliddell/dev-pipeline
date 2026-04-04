@@ -72,3 +72,10 @@ def push(repo: Path, remote: str = "origin", branch: str = "main") -> None:
 def has_changes(repo: Path) -> bool:
     result = _run(["git", "status", "--porcelain"], repo)
     return bool(result.stdout.strip())
+
+
+def commit_uncommitted_changes(repo: Path, message: str) -> bool:
+    if not has_changes(repo):
+        return False
+    stage_and_commit(repo, message)
+    return True

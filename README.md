@@ -35,7 +35,7 @@ Flow
 	1. input: task details + git diff + "does the git diff fulfill the exit criteria & not introduce major regressions >=75℅ confidence? Yes or No? If no, why not?";
 	2. output: yes or no
 9. Logic Branch:
-	1. yes: merge feature branch to main & push main to origin;
+	1. yes: commit any uncommitted changes with the kanban task content as the commit message, then merge feature branch to main & push main to origin;
 	2. no: throw error; surface task to user for review with feedback from sanity check agent.
 10. Logic Branch:
 	1. Check Kanban: is phase complete?
