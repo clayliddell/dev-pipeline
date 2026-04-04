@@ -45,8 +45,9 @@ class PipelineConfig:
     local_repo_path: Path
     kanban_path: Path
     docs_path: Path
-    base_branch: str = "main"
-    remote_name: str = "origin"
+    base_branch: str
+    remote_name: str
+    opencode_config_path: Path
     max_tree_depth: int = 4
     max_tree_entries: int = 200
     loop_until_phase_complete: bool = True
@@ -60,6 +61,7 @@ class PipelineConfig:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the dev-pipeline")
+
     parser.add_argument(
         "--local-repo-path",
         required=True,
@@ -75,15 +77,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path to the project documents folder (default: <local-repo-path>/docs)",
     )
-    parser.add_argument("--base-branch", default="main")
-    parser.add_argument("--remote-name", default="origin")
+    parser.add_argument(
+        "--base-branch",
+        default="main",
+        help="Upstream branch to use when changes are pushed."
+    )
+    parser.add_argument(
+        "--remote-name",
+        default="origin",
+        help="Upstream remote to use when changes are pushed."
+    )
     parser.add_argument(
         "--single-task",
         action="store_true",
-        help="Process only one task instead of looping until the phase completes",
+        help="Process only one task instead of looping until the phase completes (default: False)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true", help="Run in dry-run mode with mock agents"
+        "--dry-run",
+        action="store_true",
+        help="Run in dry-run mode with mock agents (default: False)"
     )
     parser.add_argument(
         "--log",
@@ -98,7 +110,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--step",
         action="store_true",
-        help="Pause before each step and wait for [c] to continue",
+        help="Pause before each step and wait for [c] to continue (default: False)",
     )
     parser.add_argument(
         "--ssh-host",
@@ -108,14 +120,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ssh-repo-path",
         default=None,
-        help="Path to the project git repository",
+        help="""Path to the project git repository
+                (USE " AROUND ARGUMENT TO PREVENT PREMATURE SHELL EXPANSION)""",
+    )
+    parser.add_argument(
+        "--opencode-config-path",
+        default="opencode.json",
+        help="""Project-relative or absolute path to opencode config
+                If path starts with '/', absolute is assumed; otherwise, relative
+
+                (Ex: 'relative/path/to/opencode.json' ->
+                       '/path/to/project/relative/path/to/opencode.json'
+                     '/absolute/path/to/opencode.json' ->
+                       '/absolute/path/to/opencode.json')
+
+                (default: "opencode.json")"""
     )
     args = parser.parse_args(argv)
+
     # check conditional args
     if args.ssh_host and not args.ssh_repo_path:
         parser.error("ssh_repo_path required when ssh_host flag is used")
     if args.ssh_repo_path and not args.ssh_host:
         parser.error("ssh_host required when ssh_repo_path flag is used")
+
     return args
 
 def resolve_phase_file(config: PipelineConfig, kanban: Kanban) -> Path:
@@ -241,7 +269,7 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
     git_repo_path = config.local_repo_path
     # project path to perform all other commands on
     project_repo_path = config.ssh_repo_path or config.local_repo_path
-    opencode_config_path = Path("agents.opencode.jsonc").resolve()
+    opencode_config_path = config.opencode_config_path
 
     while True:
         # ── 1. Pick up task ────────────────────────────────────────
@@ -589,6 +617,28 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             print(f"[pipeline] Phase '{current_phase}' is complete. Done.")
             return
 
+def resolve_opencode_config_path(unresolved_opencode_config_path: str,
+                                 local_repo_path: Path,
+                                 ssh_repo_path: Path | None) -> Path:
+    """Resolve relative path to opencode config.
+
+    If config path does not begin with '/', assume path is relative and
+      resolve.
+
+    Ex:
+    'relative/path/to/opencode.json' ->
+      '/path/to/project/relative/path/to/opencode.json'
+    '/absolute/path/to/opencode.json' ->
+      '/absolute/path/to/opencode.json'
+    """
+    opencode_config_path = Path(unresolved_opencode_config_path)
+    if not unresolved_opencode_config_path.startswith('/'):
+        if ssh_repo_path:
+            opencode_config_path = ssh_repo_path / opencode_config_path
+        else:
+            opencode_config_path = local_repo_path / opencode_config_path
+
+    return opencode_config_path
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
@@ -612,6 +662,13 @@ def main(argv: list[str] | None = None) -> None:
         check=True,
     )
     ssh_repo_path = ssh_repo_path.stdout.strip("\r\n")
+    ssh_repo_path = Path(ssh_repo_path)
+
+    opencode_config_path = resolve_opencode_config_path(
+        args.opencode_config_path,
+        local_repo_path,
+        ssh_repo_path
+    )
 
     config = PipelineConfig(
         local_repo_path=local_repo_path,
@@ -628,6 +685,7 @@ def main(argv: list[str] | None = None) -> None:
         step_by_step=args.step,
         ssh_host=args.ssh_host,
         ssh_repo_path=Path(ssh_repo_path),
+        opencode_config_path=Path(opencode_config_path),
     )
 
     try:
