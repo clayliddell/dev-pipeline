@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from kanban import Kanban
 from lib import (
     create_or_checkout_branch,
@@ -15,8 +17,9 @@ from lib import (
     build_cr_eval_prompt,
     build_sanity_prompt,
 )
+from lib.git import GitRebaseError
 
-from pipeline import PipelineConfig, run_pipeline, resolve_phase_file
+from pipeline import PipelineConfig, PipelineError, run_pipeline, resolve_phase_file
 
 
 class TestDryRunSingleTask:
@@ -59,6 +62,34 @@ class TestDryRunSingleTask:
 class TestDryRunBranchHandling:
     """Verify branch create/delete works in dry-run context."""
     pass
+
+
+class TestGitSetupFailures:
+    def test_rebase_conflict_is_reported_as_pipeline_error(self, project_tree, monkeypatch):
+        config = PipelineConfig(
+            local_repo_path=project_tree,
+            kanban_path=project_tree / "env" / "kanban.json",
+            docs_path=project_tree / "docs",
+            base_branch="main",
+            remote_name="origin",
+            loop_until_phase_complete=False,
+            dry_run=False,
+        )
+        kanban = Kanban(config.kanban_path)
+        kanban.load()
+
+        def raise_rebase(*args, **kwargs):
+            raise GitRebaseError("rebase failed")
+
+        monkeypatch.setattr("pipeline.has_changes", lambda *args, **kwargs: False)
+        monkeypatch.setattr("pipeline.fetch_or_pull_base", lambda *args, **kwargs: None)
+        monkeypatch.setattr("pipeline.create_or_checkout_branch", lambda *args, **kwargs: None)
+        monkeypatch.setattr("pipeline.rebase_base", raise_rebase)
+
+        with pytest.raises(PipelineError, match="rebase failed"):
+            run_pipeline(config, kanban)
+
+        assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "in_progress"
 
 
 class TestDryRunEndToEnd:

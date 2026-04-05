@@ -9,7 +9,6 @@ from lib.agents import (
     _build_ssh_remote_command,
     _build_opencode_command,
     _normalize_opencode_fragment,
-    _remote_opencode_config_path,
     success_response_found,
 )
 from lib.prompts import (
@@ -142,15 +141,6 @@ class TestBuildOpencodeCommand:
         assert "--continue" in cmd
 
 
-class TestRemoteOpencodeConfigPath:
-    def test_maps_config_file_into_remote_project_dir(self):
-        remote_path = _remote_opencode_config_path(
-            Path("/remote/repo"), Path("/local/repo/agents.opencode.jsonc")
-        )
-
-        assert remote_path == "/remote/repo/agents.opencode.jsonc"
-
-
 class TestNormalizeOpencodeFragment:
     def test_strips_ansi_and_carriage_returns(self):
         fragment = '\x1b[31m{"type":"text","part":{"text":"hi"}}\r\n'
@@ -159,15 +149,14 @@ class TestNormalizeOpencodeFragment:
 
 
 class TestBuildSshRemoteCommand:
-    def test_quotes_project_dir_and_wraps_opencode_with_script(self):
+    def test_quotes_project_dir_and_builds_shell_command(self):
         ssh_cmd = _build_ssh_remote_command(
             ["/home/agent/.opencode/bin/opencode", "run", "prompt text", "--format", "json"],
             Path("/remote/repo with spaces"),
             Path("/tmp/local/agents.opencode.jsonc"),
         )
 
-        assert ssh_cmd.startswith("cd '/remote/repo with spaces' && if command -v script >/dev/null 2>&1; then ")
-        assert "script -qefc" in ssh_cmd
+        assert ssh_cmd.startswith("cd '/remote/repo with spaces' && env TERM=dumb COLUMNS=512 LINES=200 OPENCODE_CONFIG=/tmp/local/agents.opencode.jsonc stdbuf -oL -eL /home/agent/.opencode/bin/opencode run 'prompt text' --format json")
         assert "TERM=dumb" in ssh_cmd
         assert "COLUMNS=512" in ssh_cmd
         assert "LINES=200" in ssh_cmd

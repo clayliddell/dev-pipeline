@@ -158,18 +158,16 @@ def test_opencode_ssh_uses_script_wrapped_non_pty_invocation(project_tree, monke
     )
 
     ssh_argv = captured["args"][0]
-    assert ssh_argv[:5] == ["ssh", "-T", "-n", "agentvm", "bash"]
-    assert ssh_argv[5] == "-lc"
-    assert "cd '/remote/repo with spaces' &&" in ssh_argv[6]
-    assert "if command -v script >/dev/null 2>&1; then" in ssh_argv[6]
-    assert "script -qefc" in ssh_argv[6]
-    assert "TERM=dumb" in ssh_argv[6]
-    assert "COLUMNS=512" in ssh_argv[6]
-    assert "LINES=200" in ssh_argv[6]
-    assert "OPENCODE_CONFIG=" in ssh_argv[6]
-    assert "agents.opencode.jsonc" in ssh_argv[6]
-    assert "stdbuf -oL -eL" in ssh_argv[6]
-    assert "/home/agent/.opencode/bin/opencode run 'prompt text' --format json" in ssh_argv[6]
+    assert ssh_argv[:4] == ["ssh", "-T", "-n", "agentvm"]
+    assert ssh_argv[4].startswith("bash -c ")
+    assert "/remote/repo with spaces" in ssh_argv[4]
+    assert "TERM=dumb" in ssh_argv[4]
+    assert "COLUMNS=512" in ssh_argv[4]
+    assert "LINES=200" in ssh_argv[4]
+    assert "OPENCODE_CONFIG=" in ssh_argv[4]
+    assert "agents.opencode.jsonc" in ssh_argv[4]
+    assert "stdbuf -oL -eL" in ssh_argv[4]
+    assert "prompt text" in ssh_argv[4]
 
     assert captured["kwargs"]["stdout"] is not None
     assert captured["kwargs"]["stderr"] is not None

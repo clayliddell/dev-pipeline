@@ -30,6 +30,7 @@ from lib import (
     build_cr_eval_prompt,
     build_sanity_prompt,
 )
+from lib.git import GitRebaseError
 from lib.jsonlog import close_json_log, log_json, setup_json_log
 from lib.tui import (
     TerminalBlock,
@@ -347,7 +348,10 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             create_or_checkout_branch(git_repo_path, feature_branch, config.base_branch)
 
         if not config.dry_run:
-            rebase_base(git_repo_path, config.base_branch)
+            try:
+                rebase_base(git_repo_path, config.base_branch)
+            except GitRebaseError as exc:
+                raise PipelineError(str(exc)) from None
 
         log_pipeline_event(
             "branch.created",
