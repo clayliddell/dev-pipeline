@@ -133,8 +133,17 @@ def _run_opencode_command(
     if ssh_host:
         ssh_cmd = _build_ssh_remote_command(cmd, project_dir, opencode_config_path)
         final_cmd = f"bash -c {shlex.quote(ssh_cmd)}"
-        proc = subprocess.Popen(
-            ["ssh", "-T", "-n", ssh_host, final_cmd],
+        proc = subprocess.Popen([
+            "ssh",
+            "-T", "-n",
+            "-o", "ForwardAgent=no",
+            "-o", "ForwardX11=no",
+            "-o", "ForwardX11Trusted=no",
+            "-o", "AddKeysToAgent=no",
+            "-o", "PermitLocalCommand=no",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "ConnectTimeout=10",
+            ssh_host, final_cmd],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
