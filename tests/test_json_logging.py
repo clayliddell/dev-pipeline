@@ -31,10 +31,10 @@ def test_parse_args_accepts_json_log_path():
     args = parse_args([
         "--local-repo-path",
         "/tmp/project",
-        "--logging-json",
+        "--log-json",
         "events.jsonl",
     ])
-    assert args.logging_json == "events.jsonl"
+    assert args.log_json == "events.jsonl"
 
 
 def test_pipeline_writes_json_events(project_tree, tmp_path):

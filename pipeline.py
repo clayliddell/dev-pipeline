@@ -133,10 +133,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--log",
         default=None,
-        help="Path to log file (captures all pipeline output)",
+        help="Path to TXT log file (captures all pipeline output)",
     )
     parser.add_argument(
-        "--logging-json",
+        "--log-json",
         default=None,
         help="Path to JSONL log file (captures pipeline and OpenCode events)",
     )
@@ -889,8 +889,8 @@ def main(argv: list[str] | None = None) -> None:
         loop_until_phase_complete=not args.single_task,
         dry_run=args.dry_run,
         log_path=Path(args.log).resolve() if args.log else None,
-        json_log_path=Path(args.logging_json).expanduser().resolve()
-        if args.logging_json
+        json_log_path=Path(args.log_json).expanduser().resolve()
+        if args.log_json
         else None,
         step_by_step=args.step,
         ssh_host=args.ssh_host,
