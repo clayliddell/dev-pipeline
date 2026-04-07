@@ -13,6 +13,22 @@ class TestLoad:
         assert data["meta"]["current_phase"] == "phase-1"
         assert data["meta"]["current_task"] is None
 
+    def test_load_normalizes_legacy_statuses(self, tmp_path, sample_kanban_data):
+        sample_kanban_data["phases"][0]["components"][0]["tasks"][0]["status"] = (
+            "project_manager"
+        )
+        sample_kanban_data["phases"][0]["components"][0]["tasks"][1]["status"] = (
+            "code_review"
+        )
+        path = tmp_path / "kanban.json"
+        path.write_text(json.dumps(sample_kanban_data, indent=2))
+
+        kb = Kanban(path)
+        kb.load()
+
+        assert kb._get_task("phase-1.comp-a.task-1")[2]["status"] == "project_manager"
+        assert kb._get_task("phase-1.comp-a.task-2")[2]["status"] == "code_review"
+
     def test_data_lazy_loads(self, kanban_file):
         kb = Kanban(kanban_file)
         assert kb._data == {}
@@ -71,8 +87,8 @@ class TestMutations:
     def test_set_status(self, kanban_file):
         kb = Kanban(kanban_file)
         kb.load()
-        task = kb.set_status("phase-1.comp-a.task-1", "in_progress")
-        assert task["status"] == "in_progress"
+        task = kb.set_status("phase-1.comp-a.task-1", "project_manager")
+        assert task["status"] == "project_manager"
         assert kb.data["meta"]["current_task"] == "phase-1.comp-a.task-1"
 
     def test_set_status_invalid(self, kanban_file):
@@ -87,12 +103,12 @@ class TestMutations:
         with pytest.raises(KeyError):
             kb.set_status("does.not.exist", "done")
 
-    def test_set_status_enforces_single_in_progress(self, kanban_file):
+    def test_set_status_enforces_single_active_task(self, kanban_file):
         kb = Kanban(kanban_file)
         kb.load()
-        kb.set_status("phase-1.comp-a.task-1", "in_progress")
-        with pytest.raises(RuntimeError, match="already in_progress"):
-            kb.set_status("phase-1.comp-a.task-2", "in_progress")
+        kb.set_status("phase-1.comp-a.task-1", "project_manager")
+        with pytest.raises(RuntimeError, match="already active"):
+            kb.set_status("phase-1.comp-a.task-2", "software_engineer")
 
     def test_pickup_next_returns_first_unblocked(self, kanban_file):
         kb = Kanban(kanban_file)
@@ -100,7 +116,7 @@ class TestMutations:
         task = kb.pickup_next()
         assert task is not None
         assert task["id"] == "phase-1.comp-a.task-1"
-        assert task["status"] == "in_progress"
+        assert task["status"] == "project_manager"
 
     def test_pickup_next_skips_blocked(self, kanban_file):
         kb = Kanban(kanban_file)
@@ -109,6 +125,7 @@ class TestMutations:
         task = kb.pickup_next()
         assert task is not None
         assert task["id"] == "phase-1.comp-a.task-2"
+        assert task["status"] == "project_manager"
 
     def test_pickup_next_returns_none_when_all_blocked(self, sample_kanban_data):
         """Both tasks blocked — nothing to pick up."""
@@ -133,15 +150,51 @@ class TestMutations:
         next_task = kb.complete_current()
         assert next_task is not None
         assert next_task["id"] == "phase-1.comp-a.task-2"
+        assert next_task["status"] == "project_manager"
 
     def test_review_current(self, kanban_file):
         kb = Kanban(kanban_file)
         kb.load()
         kb.pickup_next()
         next_task = kb.review_current()
-        # task-2 is still blocked (task-1 is in_review, not done)
+        # task-2 is still blocked (task-1 is code_review, not done)
         assert next_task is None
-        assert kb._get_task("phase-1.comp-a.task-1")[2]["status"] == "in_review"
+        assert kb._get_task("phase-1.comp-a.task-1")[2]["status"] == "code_review"
+
+    def test_resume_payload_roundtrip(self, kanban_file):
+        kb = Kanban(kanban_file)
+        kb.load()
+        kb.set_resume_payload(
+            "phase-1.comp-a.task-1",
+            "project_manager",
+            "plan input",
+            output="plan output",
+            confirmed=True,
+        )
+        kb.save()
+
+        kb2 = Kanban(kanban_file)
+        kb2.load()
+        payload = kb2.get_resume_payload("phase-1.comp-a.task-1", "project_manager")
+
+        assert payload is not None
+        assert payload["input"] == "plan input"
+        assert payload["output"] == "plan output"
+        assert payload["confirmed"] is True
+
+    def test_done_clears_resume_payload(self, kanban_file):
+        kb = Kanban(kanban_file)
+        kb.load()
+        kb.set_resume_payload(
+            "phase-1.comp-a.task-1",
+            "project_manager",
+            "plan input",
+            output="plan output",
+            confirmed=True,
+        )
+        kb.set_status("phase-1.comp-a.task-1", "done")
+
+        assert "resume" not in kb._get_task("phase-1.comp-a.task-1")[2]
 
 
 class TestProgress:

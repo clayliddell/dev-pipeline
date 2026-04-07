@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import pipeline
+
 from kanban import Kanban
 from lib import (
     create_or_checkout_branch,
@@ -44,6 +46,160 @@ class TestDryRunSingleTask:
         task = kanban._get_task("phase-1.comp-a.task-1")
         assert task is not None
         assert task[2]["status"] == "done"
+        assert "resume" not in task[2]
+
+    def test_resumes_software_engineer_from_cached_pm_output(self, project_tree, monkeypatch):
+        config = PipelineConfig(
+            local_repo_path=project_tree,
+            kanban_path=project_tree / "env" / "kanban.json",
+            docs_path=project_tree / "docs",
+            base_branch="main",
+            remote_name="origin",
+            loop_until_phase_complete=False,
+            dry_run=True,
+        )
+        kanban = Kanban(config.kanban_path)
+        kanban.load()
+        kanban.set_status("phase-1.comp-a.task-1", "software_engineer")
+        kanban.set_resume_payload(
+            "phase-1.comp-a.task-1",
+            "project_manager",
+            "cached pm input",
+            output="cached plan output",
+            confirmed=True,
+        )
+        kanban.save()
+
+        captured: dict[str, str] = {}
+
+        def fake_build_swe_prompt(pm_output: str) -> str:
+            captured["pm_output"] = pm_output
+            return "swe prompt"
+
+        monkeypatch.setattr("pipeline.build_swe_prompt", fake_build_swe_prompt)
+
+        run_pipeline(config, kanban)
+
+        assert captured["pm_output"] == "cached plan output"
+        assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "done"
+
+    def test_resumes_code_review_eval_without_rerunning_earlier_stages(
+        self, project_tree, monkeypatch
+    ):
+        config = PipelineConfig(
+            local_repo_path=project_tree,
+            kanban_path=project_tree / "env" / "kanban.json",
+            docs_path=project_tree / "docs",
+            base_branch="main",
+            remote_name="origin",
+            loop_until_phase_complete=False,
+            dry_run=True,
+        )
+        kanban = Kanban(config.kanban_path)
+        kanban.load()
+        kanban.set_status("phase-1.comp-a.task-1", "code_review_eval")
+        kanban.set_resume_payload(
+            "phase-1.comp-a.task-1",
+            "project_manager",
+            "cached pm input",
+            output="cached plan output",
+            confirmed=True,
+        )
+        kanban.set_resume_payload(
+            "phase-1.comp-a.task-1",
+            "code_review",
+            "cached cr input",
+            output="cached review output",
+            confirmed=True,
+        )
+        kanban.save()
+
+        agents_called: list[str] = []
+        cr_eval_inputs: dict[str, str] = {}
+
+        def fake_build_cr_eval_prompt(cr_output: str) -> str:
+            cr_eval_inputs["cr_output"] = cr_output
+            return "cr eval prompt"
+
+        def fake_mock_run_agent(prompt, project_dir, opencode_config_path, agent="default", **kwargs):
+            agents_called.append(agent)
+            return pipeline.AgentRunResult(response="Dry-run: mock agent completed.", session_id=None)
+
+        monkeypatch.setattr("pipeline.build_cr_eval_prompt", fake_build_cr_eval_prompt)
+        monkeypatch.setattr("pipeline.mock_run_agent", fake_mock_run_agent)
+
+        run_pipeline(config, kanban)
+
+        assert cr_eval_inputs["cr_output"] == "cached review output"
+        assert agents_called == ["cr-evaler", "sanity-checker"]
+        assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "done"
+
+    def test_failed_stage_keeps_input_and_reruns_from_start(self, project_tree, monkeypatch):
+        config = PipelineConfig(
+            local_repo_path=project_tree,
+            kanban_path=project_tree / "env" / "kanban.json",
+            docs_path=project_tree / "docs",
+            base_branch="main",
+            remote_name="origin",
+            loop_until_phase_complete=False,
+            dry_run=True,
+        )
+        kanban = Kanban(config.kanban_path)
+        kanban.load()
+        kanban.set_resume_payload(
+            "phase-1.comp-a.task-1",
+            "project_manager",
+            "cached pm input",
+        )
+        kanban.save()
+
+        captured_prompts: list[str] = []
+        success_calls = {"count": 0}
+
+        def fake_build_pm_prompt(*args, **kwargs):
+            return "fresh pm input"
+
+        def fake_mock_run_agent(prompt, project_dir, opencode_config_path, agent="default", **kwargs):
+            if agent == "project-manager":
+                captured_prompts.append(prompt)
+            return pipeline.AgentRunResult(response="Draft plan", session_id=None)
+
+        def fake_mock_check_agent_success(
+            project_dir,
+            opencode_config_path,
+            *,
+            agent,
+            agent_name,
+            prior_result,
+            task_id="",
+            step_num=0,
+            step_title="",
+            ssh_host=None,
+        ):
+            success_calls["count"] += 1
+            if agent == "project-manager" and success_calls["count"] == 1:
+                return pipeline.AgentRunResult(response="no", session_id=None)
+            return pipeline.AgentRunResult(response="yes", session_id=None)
+
+        monkeypatch.setattr("pipeline.build_pm_prompt", fake_build_pm_prompt)
+        monkeypatch.setattr("pipeline.mock_run_agent", fake_mock_run_agent)
+        monkeypatch.setattr("pipeline.mock_check_agent_success", fake_mock_check_agent_success)
+
+        with pytest.raises(PipelineError, match="did not confirm success"):
+            run_pipeline(config, kanban)
+
+        payload = kanban.get_resume_payload("phase-1.comp-a.task-1", "project_manager")
+        assert payload is not None
+        assert payload["input"] == "cached pm input"
+        assert "output" not in payload
+        assert payload["confirmed"] is False
+        assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "project_manager"
+
+        run_pipeline(config, kanban)
+
+        assert captured_prompts[:2] == ["cached pm input", "cached pm input"]
+        assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "done"
+        assert "resume" not in kanban._get_task("phase-1.comp-a.task-1")[2]
 
     def test_phase_file_resolved(self, project_tree):
         config = PipelineConfig(
@@ -89,7 +245,7 @@ class TestGitSetupFailures:
         with pytest.raises(PipelineError, match="rebase failed"):
             run_pipeline(config, kanban)
 
-        assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "in_progress"
+        assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "project_manager"
 
 
 class TestDryRunEndToEnd:

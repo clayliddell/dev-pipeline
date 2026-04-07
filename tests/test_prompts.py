@@ -122,24 +122,6 @@ class TestBuildOpencodeCommand:
 
         assert cmd[2] == prompt
 
-    def test_uses_session_id_when_present(self):
-        cmd = _build_opencode_command(
-            "hello", agent="project-manager", session_id="ses-1"
-        )
-
-        assert "--session" in cmd
-        assert "ses-1" in cmd
-        assert "--continue" not in cmd
-
-    def test_falls_back_to_continue_without_session_id(self):
-        cmd = _build_opencode_command(
-            "hello",
-            agent="project-manager",
-            continue_last_session=True,
-        )
-
-        assert "--continue" in cmd
-
 
 class TestNormalizeOpencodeFragment:
     def test_strips_ansi_and_carriage_returns(self):

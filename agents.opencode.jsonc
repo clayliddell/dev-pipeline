@@ -125,5 +125,8 @@
       }
     }
   },
-  "plugin": ["@tarquinen/opencode-dcp@latest", "opencode-openai-codex-auth"]
+  "plugin": [
+    "@tarquinen/opencode-dcp@latest",
+    "opencode-openai-codex-auth"
+  ]
 }

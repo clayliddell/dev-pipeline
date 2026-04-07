@@ -158,16 +158,18 @@ def test_opencode_ssh_uses_script_wrapped_non_pty_invocation(project_tree, monke
     )
 
     ssh_argv = captured["args"][0]
-    assert ssh_argv[:4] == ["ssh", "-T", "-n", "agentvm"]
-    assert ssh_argv[4].startswith("bash -c ")
-    assert "/remote/repo with spaces" in ssh_argv[4]
-    assert "TERM=dumb" in ssh_argv[4]
-    assert "COLUMNS=512" in ssh_argv[4]
-    assert "LINES=200" in ssh_argv[4]
-    assert "OPENCODE_CONFIG=" in ssh_argv[4]
-    assert "agents.opencode.jsonc" in ssh_argv[4]
-    assert "stdbuf -oL -eL" in ssh_argv[4]
-    assert "prompt text" in ssh_argv[4]
+    assert ssh_argv[:3] == ["ssh", "-T", "-n"]
+    ssh_host = ssh_argv[-2]
+    assert ssh_host == "agentvm"
+    assert ssh_argv[-1].startswith("bash -c ")
+    assert "/remote/repo with spaces" in ssh_argv[-1]
+    assert "TERM=dumb" in ssh_argv[-1]
+    assert "COLUMNS=512" in ssh_argv[-1]
+    assert "LINES=200" in ssh_argv[-1]
+    assert "OPENCODE_CONFIG=" in ssh_argv[-1]
+    assert "agents.opencode.jsonc" in ssh_argv[-1]
+    assert "stdbuf -oL -eL" in ssh_argv[-1]
+    assert "prompt text" in ssh_argv[-1]
 
     assert captured["kwargs"]["stdout"] is not None
     assert captured["kwargs"]["stderr"] is not None

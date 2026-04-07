@@ -60,8 +60,6 @@ def _build_opencode_command(
     prompt: str,
     *,
     agent: str,
-    session_id: str | None = None,
-    continue_last_session: bool = False,
 ) -> list[str]:
     opencode_command = "/home/agent/.opencode/bin/opencode"
     cmd = [
@@ -74,10 +72,6 @@ def _build_opencode_command(
         "--format",
         "json",
     ]
-    if session_id:
-        cmd.extend(["--session", session_id])
-    elif continue_last_session:
-        cmd.append("--continue")
     return cmd
 
 def _normalize_opencode_fragment(fragment: str) -> str:

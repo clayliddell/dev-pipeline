@@ -63,6 +63,35 @@ class PipelineConfig:
     ssh_repo_path: Path | None = None
 
 
+STAGE_ORDER = [
+    "project_manager",
+    "software_engineer",
+    "code_review",
+    "code_review_eval",
+    "sanity_check",
+    "finalization",
+]
+
+START_STAGE_BY_STATUS = {
+    "todo": "project_manager",
+    "project_manager": "project_manager",
+    "software_engineer": "software_engineer",
+    "code_review": "code_review",
+    "code_review_eval": "code_review_eval",
+    "sanity_check": "sanity_check",
+    "finalization": "finalization",
+}
+
+NEXT_STATUS_BY_STAGE = {
+    "project_manager": "software_engineer",
+    "software_engineer": "code_review",
+    "code_review": "code_review_eval",
+    "code_review_eval": "sanity_check",
+    "sanity_check": "finalization",
+    "finalization": "done",
+}
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the dev-pipeline")
 
@@ -172,6 +201,208 @@ def log_pipeline_event(event: str, **fields) -> None:
     log_json(f"pipeline.{event}", **fields)
 
 
+def start_stage_for_status(status: str) -> str:
+    return START_STAGE_BY_STATUS.get(status, "project_manager")
+
+
+def stage_resume_payload(task: dict, stage: str) -> dict | None:
+    return task.get("resume", {}).get(stage)
+
+
+def stage_resume_input(task: dict, stage: str) -> str | None:
+    payload = stage_resume_payload(task, stage)
+    if not payload:
+        return None
+    return payload.get("input")
+
+
+def require_resume_output(task: dict, stage: str, stage_label: str) -> str:
+    payload = stage_resume_payload(task, stage)
+    if not payload or not payload.get("confirmed", False) or "output" not in payload:
+        raise PipelineError(
+            f"Task '{task['id']}' is at '{task.get('status', 'todo')}' but missing "
+            f"cached {stage_label} output needed to resume."
+        )
+    return payload["output"]
+
+
+def save_stage_checkpoint(
+    kanban: Kanban,
+    task_id: str,
+    stage: str,
+    input_text: str,
+    *,
+    output_text: str | None = None,
+    confirmed: bool,
+) -> None:
+    kanban.set_resume_payload(
+        task_id,
+        stage,
+        input_text,
+        output=output_text,
+        confirmed=confirmed,
+    )
+
+
+def activate_task_stage(kanban: Kanban, task_id: str, stage: str) -> None:
+    kanban.set_status(task_id, stage)
+    if stage == "finalization":
+        kanban.data["meta"]["current_task"] = task_id
+    kanban.save()
+
+
+def advance_task_stage(
+    kanban: Kanban,
+    task_id: str,
+    next_status: str,
+    *,
+    step_num: int,
+    step_title: str,
+) -> None:
+    kanban.set_status(task_id, next_status)
+    kanban.save()
+    log_pipeline_event(
+        "status.updated",
+        task_id=task_id,
+        status=next_status,
+        step_num=step_num,
+        step_title=step_title,
+    )
+    print_block(
+        TerminalBlock(
+            "INFO",
+            f"Status: {next_status}",
+            subtitle="kanban updated",
+            title_prefix=f"{task_id} - Step {step_num}: {step_title}",
+        )
+    )
+
+
+def run_agent_stage(
+    *,
+    config: PipelineConfig,
+    kanban: Kanban,
+    task: dict,
+    task_id: str,
+    stage: str,
+    next_status: str,
+    step_num: int,
+    step_title: str,
+    agent: str,
+    agent_name: str,
+    prompt: str,
+    agent_fn,
+    success_check_fn,
+):
+    log_pipeline_event(
+        "step.start",
+        task_id=task_id,
+        step_num=step_num,
+        step_title=step_title,
+    )
+    pause = config.step_by_step
+    if pause:
+        input("Press Enter to continue...")
+
+    activate_task_stage(kanban, task_id, stage)
+    save_stage_checkpoint(
+        kanban,
+        task_id,
+        stage,
+        prompt,
+        output_text=None,
+        confirmed=False,
+    )
+    kanban.save()
+
+    try:
+        result = agent_fn(
+            prompt,
+            config.ssh_repo_path or config.local_repo_path,
+            config.opencode_config_path,
+            agent=agent,
+            agent_name=agent_name,
+            task_id=task_id,
+            step_num=step_num,
+            step_title=step_title,
+            ssh_host=config.ssh_host,
+        )
+        save_stage_checkpoint(
+            kanban,
+            task_id,
+            stage,
+            prompt,
+            output_text=result.response,
+            confirmed=False,
+        )
+        kanban.save()
+
+        message = ensure_agent_succeeded(
+            config.ssh_repo_path or config.local_repo_path,
+            config.opencode_config_path,
+            agent=agent,
+            agent_name=agent_name,
+            result=result,
+            task_id=task_id,
+            step_num=step_num,
+            step_title=step_title,
+            ssh_host=config.ssh_host,
+            success_check_fn=success_check_fn,
+        )
+    except Exception as exc:
+        save_stage_checkpoint(
+            kanban,
+            task_id,
+            stage,
+            prompt,
+            output_text=None,
+            confirmed=False,
+        )
+        kanban.save()
+        error_message = str(exc)
+        log_pipeline_event(
+            "step.failed",
+            task_id=task_id,
+            step_num=step_num,
+            step_title=step_title,
+            error=error_message,
+        )
+        print_block(
+            TerminalBlock(
+                "ERROR",
+                error_message,
+                subtitle="failed",
+                title_prefix=f"{task_id} - Step {step_num}: {step_title}",
+            )
+        )
+        if isinstance(exc, PipelineError):
+            raise
+        raise PipelineError(error_message) from None
+
+    save_stage_checkpoint(
+        kanban,
+        task_id,
+        stage,
+        prompt,
+        output_text=result.response,
+        confirmed=True,
+    )
+    advance_task_stage(
+        kanban,
+        task_id,
+        next_status,
+        step_num=step_num,
+        step_title=step_title,
+    )
+    log_pipeline_event(
+        "step.complete",
+        task_id=task_id,
+        step_num=step_num,
+        step_title=step_title,
+    )
+    return message
+
+
 def mock_run_agent(
     prompt: str,
     project_dir: Path,
@@ -183,6 +414,7 @@ def mock_run_agent(
     task_id = kwargs.get("task_id", "")
     step_num = kwargs.get("step_num", 0)
     step_title = kwargs.get("step_title", "")
+    session_id = kwargs.get("session_id") or f"dry-run-{agent}"
     prefix = f"{task_id} - Step {step_num}: {step_title}" if task_id else ""
 
     preview = prompt[:120].replace("\n", " ")
@@ -197,7 +429,7 @@ def mock_run_agent(
 
     return AgentRunResult(
         response="Dry-run: mock agent completed.",
-        session_id=f"dry-run-{agent}",
+        session_id=session_id,
     )
 
 
@@ -249,7 +481,7 @@ def ensure_agent_succeeded(
 
 
 def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
-    """Main pipeline orchestration — the 10-step loop from README.md."""
+    """Main pipeline orchestration — the stage-based loop from README.md."""
 
     log_pipeline_event(
         "start",
@@ -271,8 +503,6 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
     )
     # local path to perform git commands on
     git_repo_path = config.local_repo_path
-    # project path to perform all other commands on
-    project_repo_path = config.ssh_repo_path or config.local_repo_path
     opencode_config_path = config.opencode_config_path
 
     while True:
@@ -284,6 +514,9 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             return
         kanban.save()
         task_id = task["id"]
+        task_status = task.get("status", "todo")
+        start_stage = start_stage_for_status(task_status)
+        stage_index = STAGE_ORDER.index(start_stage)
         step = 0
 
         log_pipeline_event(
@@ -376,220 +609,152 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             branch=feature_branch,
         )
 
+        pm_message = None
+        cr_message = None
+
+        if stage_index > STAGE_ORDER.index("project_manager"):
+            pm_message = require_resume_output(
+                task, "project_manager", "Project Manager"
+            )
+        if stage_index > STAGE_ORDER.index("code_review"):
+            cr_message = require_resume_output(task, "code_review", "Code Review")
+
         # ── 3. PM Agent (no tool use) ─────────────────────────────
-        step = 3
-        log_pipeline_event(
-            "step.start", task_id=task_id, step_num=step, step_title="Project Manager"
-        )
-        pause("Project Manager")
-        pm_prompt = build_pm_prompt(
-            task, code_standard, architecture, phase_content, fs_tree
-        )
-        pm_output = agent_fn(
-            pm_prompt,
-            project_repo_path,
-            opencode_config_path,
-            agent="project-manager",
-            agent_name="Project Manager",
-            task_id=task_id,
-            step_num=step,
-            step_title="Project Manager",
-            ssh_host=config.ssh_host,
-        )
-        pm_message = ensure_agent_succeeded(
-            project_repo_path,
-            opencode_config_path,
-            agent="project-manager",
-            agent_name="Project Manager",
-            result=pm_output,
-            task_id=task_id,
-            step_num=step,
-            step_title="Project Manager",
-            ssh_host=config.ssh_host,
-            success_check_fn=success_check_fn,
-        )
-        log_pipeline_event(
-            "step.complete",
-            task_id=task_id,
-            step_num=step,
-            step_title="Project Manager",
-        )
+        if stage_index <= STAGE_ORDER.index("project_manager"):
+            step = 3
+            pm_prompt = stage_resume_input(task, "project_manager")
+            if pm_prompt is None:
+                pm_prompt = build_pm_prompt(
+                    task, code_standard, architecture, phase_content, fs_tree
+                )
+            pm_message = run_agent_stage(
+                config=config,
+                kanban=kanban,
+                task=task,
+                task_id=task_id,
+                stage="project_manager",
+                next_status=NEXT_STATUS_BY_STAGE["project_manager"],
+                step_num=step,
+                step_title="Project Manager",
+                agent="project-manager",
+                agent_name="Project Manager",
+                prompt=pm_prompt,
+                agent_fn=agent_fn,
+                success_check_fn=success_check_fn,
+            )
 
         # ── 4. SWE Agent (tool use) ───────────────────────────────
-        step = 4
-        log_pipeline_event(
-            "step.start", task_id=task_id, step_num=step, step_title="Software Engineer"
-        )
-        pause("Software Engineer")
-        swe_prompt = build_swe_prompt(pm_message)
-        swe_output = agent_fn(
-            swe_prompt,
-            project_repo_path,
-            opencode_config_path,
-            agent="software-engineer",
-            agent_name="Software Engineer",
-            task_id=task_id,
-            step_num=step,
-            step_title="Software Engineer",
-            ssh_host=config.ssh_host,
-        )
-        ensure_agent_succeeded(
-            project_repo_path,
-            opencode_config_path,
-            agent="software-engineer",
-            agent_name="Software Engineer",
-            result=swe_output,
-            task_id=task_id,
-            step_num=step,
-            step_title="Software Engineer",
-            ssh_host=config.ssh_host,
-            success_check_fn=success_check_fn,
-        )
-        log_pipeline_event(
-            "step.complete",
-            task_id=task_id,
-            step_num=step,
-            step_title="Software Engineer",
-        )
+        if stage_index <= STAGE_ORDER.index("software_engineer"):
+            step = 4
+            swe_prompt = stage_resume_input(task, "software_engineer")
+            if swe_prompt is None:
+                if not pm_message:
+                    raise PipelineError("Failed to resume task: PM message missing")
+                swe_prompt = build_swe_prompt(pm_message)
+            run_agent_stage(
+                config=config,
+                kanban=kanban,
+                task=task,
+                task_id=task_id,
+                stage="software_engineer",
+                next_status=NEXT_STATUS_BY_STAGE["software_engineer"],
+                step_num=step,
+                step_title="Software Engineer",
+                agent="software-engineer",
+                agent_name="Software Engineer",
+                prompt=swe_prompt,
+                agent_fn=agent_fn,
+                success_check_fn=success_check_fn,
+            )
 
         # ── 5. Move to review ─────────────────────────────────────
-        step = 5
-        log_pipeline_event(
-            "step.start", task_id=task_id, step_num=step, step_title="Move to Review"
-        )
-        pause("Move to Review")
-        kanban.set_status(task_id, "in_review")
-        kanban.save()
-        log_pipeline_event(
-            "status.updated",
-            task_id=task_id,
-            status="in_review",
-            step_num=step,
-            step_title="Move to Review",
-        )
-        print_block(
-            TerminalBlock(
-                "INFO",
-                "Status: in_review",
-                subtitle="kanban updated",
-                title_prefix=f"{task_id} - Step {step}: Move to Review",
+        if stage_index < STAGE_ORDER.index("code_review"):
+            step = 5
+            log_pipeline_event(
+                "step.start",
+                task_id=task_id,
+                step_num=step,
+                step_title="Move to Review",
             )
-        )
-        log_pipeline_event(
-            "step.complete", task_id=task_id, step_num=step, step_title="Move to Review"
-        )
+            if config.step_by_step:
+                input("Press Enter to continue...")
+            log_pipeline_event(
+                "step.complete",
+                task_id=task_id,
+                step_num=step,
+                step_title="Move to Review",
+            )
 
         # ── 6. CR Agent (no tool use) ─────────────────────────────
-        step = 6
-        log_pipeline_event(
-            "step.start", task_id=task_id, step_num=step, step_title="Code Review"
-        )
-        pause("Code Review")
-        diff = get_diff(git_repo_path, config.base_branch)
-        cr_prompt = build_cr_prompt(
-            diff, task, architecture, code_standard, phase_content, fs_tree
-        )
-        cr_output = agent_fn(
-            cr_prompt,
-            project_repo_path,
-            opencode_config_path,
-            agent="code-reviewer",
-            agent_name="Code Reviewer",
-            task_id=task_id,
-            step_num=step,
-            step_title="Code Review",
-            ssh_host=config.ssh_host,
-        )
-        cr_message = ensure_agent_succeeded(
-            project_repo_path,
-            opencode_config_path,
-            agent="code-reviewer",
-            agent_name="Code Reviewer",
-            result=cr_output,
-            task_id=task_id,
-            step_num=step,
-            step_title="Code Review",
-            ssh_host=config.ssh_host,
-            success_check_fn=success_check_fn,
-        )
-        log_pipeline_event(
-            "step.complete", task_id=task_id, step_num=step, step_title="Code Review"
-        )
+        if stage_index <= STAGE_ORDER.index("code_review"):
+            step = 6
+            diff = get_diff(git_repo_path, config.base_branch)
+            cr_prompt = stage_resume_input(task, "code_review")
+            if cr_prompt is None:
+                cr_prompt = build_cr_prompt(
+                    diff, task, architecture, code_standard, phase_content, fs_tree
+                )
+            cr_message = run_agent_stage(
+                config=config,
+                kanban=kanban,
+                task=task,
+                task_id=task_id,
+                stage="code_review",
+                next_status=NEXT_STATUS_BY_STAGE["code_review"],
+                step_num=step,
+                step_title="Code Review",
+                agent="code-reviewer",
+                agent_name="Code Reviewer",
+                prompt=cr_prompt,
+                agent_fn=agent_fn,
+                success_check_fn=success_check_fn,
+            )
 
-        # ── 7. CR Eval Agent (tool use) ───────────────────────────
-        step = 7
-        log_pipeline_event(
-            "step.start",
-            task_id=task_id,
-            step_num=step,
-            step_title="Code Review Evaluation",
-        )
-        pause("Code Review Evaluation")
-        cr_eval_prompt = build_cr_eval_prompt(cr_message)
-        cr_eval_output = agent_fn(
-            cr_eval_prompt,
-            project_repo_path,
-            opencode_config_path,
-            agent="cr-evaler",
-            agent_name="Code Review Evaluator",
-            task_id=task_id,
-            step_num=step,
-            step_title="Code Review Evaluation",
-            ssh_host=config.ssh_host,
-        )
-        ensure_agent_succeeded(
-            project_repo_path,
-            opencode_config_path,
-            agent="cr-evaler",
-            agent_name="Code Review Evaluator",
-            result=cr_eval_output,
-            task_id=task_id,
-            step_num=step,
-            step_title="Code Review Evaluation",
-            ssh_host=config.ssh_host,
-            success_check_fn=success_check_fn,
-        )
-        log_pipeline_event(
-            "step.complete",
-            task_id=task_id,
-            step_num=step,
-            step_title="Code Review Evaluation",
-        )
+        if stage_index <= STAGE_ORDER.index("code_review_eval"):
+            step = 7
+            cr_eval_prompt = stage_resume_input(task, "code_review_eval")
+            if cr_eval_prompt is None:
+                if not cr_message:
+                    raise PipelineError("Failed to resume task: CR message missing")
+                cr_eval_prompt = build_cr_eval_prompt(cr_message)
+            run_agent_stage(
+                config=config,
+                kanban=kanban,
+                task=task,
+                task_id=task_id,
+                stage="code_review_eval",
+                next_status=NEXT_STATUS_BY_STAGE["code_review_eval"],
+                step_num=step,
+                step_title="Code Review Evaluation",
+                agent="cr-evaler",
+                agent_name="Code Review Evaluator",
+                prompt=cr_eval_prompt,
+                agent_fn=agent_fn,
+                success_check_fn=success_check_fn,
+            )
 
         # ── 8. Sanity Check Agent (no tool use) ───────────────────
-        step = 8
-        log_pipeline_event(
-            "step.start", task_id=task_id, step_num=step, step_title="Sanity Check"
-        )
-        pause("Sanity Check")
-        diff = get_diff(git_repo_path, config.base_branch)
-        sanity_prompt = build_sanity_prompt(task, diff)
-        sanity_output = agent_fn(
-            sanity_prompt,
-            project_repo_path,
-            opencode_config_path,
-            agent="sanity-checker",
-            agent_name="Sanity Check",
-            task_id=task_id,
-            step_num=step,
-            step_title="Sanity Check",
-            ssh_host=config.ssh_host,
-        )
-        ensure_agent_succeeded(
-            project_repo_path,
-            opencode_config_path,
-            agent="sanity-checker",
-            agent_name="Sanity Check",
-            result=sanity_output,
-            task_id=task_id,
-            step_num=step,
-            step_title="Sanity Check",
-            ssh_host=config.ssh_host,
-            success_check_fn=success_check_fn,
-        )
-        log_pipeline_event(
-            "step.complete", task_id=task_id, step_num=step, step_title="Sanity Check"
-        )
+        if stage_index <= STAGE_ORDER.index("sanity_check"):
+            step = 8
+            diff = get_diff(git_repo_path, config.base_branch)
+            sanity_prompt = stage_resume_input(task, "sanity_check")
+            if sanity_prompt is None:
+                sanity_prompt = build_sanity_prompt(task, diff)
+            run_agent_stage(
+                config=config,
+                kanban=kanban,
+                task=task,
+                task_id=task_id,
+                stage="sanity_check",
+                next_status=NEXT_STATUS_BY_STAGE["sanity_check"],
+                step_num=step,
+                step_title="Sanity Check",
+                agent="sanity-checker",
+                agent_name="Sanity Check",
+                prompt=sanity_prompt,
+                agent_fn=agent_fn,
+                success_check_fn=success_check_fn,
+            )
 
         # ── 9. Commit, merge and mark done ────────────────────────
         step = 9
@@ -599,11 +764,33 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             step_num=step,
             step_title="Commit, Merge & Push",
         )
-        pause("Commit, Merge & Push")
-        if not config.dry_run:
-            commit_uncommitted_changes(git_repo_path, task["content"])
-            merge_branch(git_repo_path, feature_branch, config.base_branch)
-            push(git_repo_path, config.remote_name, config.base_branch)
+        if config.step_by_step:
+            input("Press Enter to continue...")
+        activate_task_stage(kanban, task_id, "finalization")
+        try:
+            if not config.dry_run:
+                commit_uncommitted_changes(git_repo_path, task["content"])
+                merge_branch(git_repo_path, feature_branch, config.base_branch)
+                push(git_repo_path, config.remote_name, config.base_branch)
+        except Exception as exc:
+            error_message = str(exc)
+            log_pipeline_event(
+                "step.failed",
+                task_id=task_id,
+                step_num=step,
+                step_title="Commit, Merge & Push",
+                error=error_message,
+            )
+            print_block(
+                TerminalBlock(
+                    "ERROR",
+                    error_message,
+                    subtitle="failed",
+                    title_prefix=f"{task_id} - Step {step}: Commit, Merge & Push",
+                )
+            )
+            raise PipelineError(error_message) from None
+        kanban.clear_resume_payload(task_id)
         kanban.set_status(task_id, "done")
         kanban.save()
         log_pipeline_event(

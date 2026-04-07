@@ -4,13 +4,20 @@ import json
 from pathlib import Path
 from typing import Optional
 
-STATUSES = ["todo", "in_progress", "in_review", "done"]
+# Ordered Kanban Swimlanes
 SWIMLANES = {
     "todo": "To Do",
-    "in_progress": "In Progress",
-    "in_review": "In Review",
+    "project_manager": "Project Manager",
+    "software_engineer": "Software Engineer",
+    "code_review": "Code Review",
+    "code_review_eval": "Code Review Eval",
+    "sanity_check": "Sanity Check",
+    "finalization": "Finalization",
     "done": "Done",
 }
+STATUSES = list(SWIMLANES.keys())
+ACTIVE_STATUSES = [status for status in STATUSES if status not in {"todo", "done"}]
+RESUME_PRIORITY = ACTIVE_STATUSES[::-1]
 
 
 class Kanban:
@@ -28,6 +35,25 @@ class Kanban:
         self._data.setdefault("meta", {})
         self._data["meta"].setdefault("current_phase", self._data["phases"][0]["id"])
         self._data["meta"].setdefault("current_task", None)
+        for phase in self._data.get("phases", []):
+            for comp in phase.get("components", []):
+                for task in comp.get("tasks", []):
+                    task["status"] = task.get("status", "todo")
+                    if not isinstance(task.get("resume"), dict):
+                        task.pop("resume", None)
+                        continue
+                    resume = task["resume"]
+                    for stage, payload in list(resume.items()):
+                        if not isinstance(payload, dict):
+                            resume.pop(stage, None)
+                            continue
+                        payload.setdefault("confirmed", False)
+
+        current_task = self._data["meta"].get("current_task")
+        if current_task:
+            result = self._get_task(current_task)
+            if result is None or result[2].get("status") == "done":
+                self._data["meta"]["current_task"] = None
         return self._data
 
     def save(self) -> None:
@@ -51,6 +77,12 @@ class Kanban:
             for comp in phase["components"]:
                 for task in comp["tasks"]:
                     yield phase, comp, task
+
+    def _task_resume(self, task: dict) -> dict:
+        return task.setdefault("resume", {})
+
+    def _task_is_active(self, task: dict) -> bool:
+        return task.get("status", "todo") in ACTIVE_STATUSES
 
     def _get_task(self, task_id: str) -> Optional[tuple]:
         """Return (phase, component, task) for a given task id, or None."""
@@ -115,37 +147,51 @@ class Kanban:
         if result is None:
             raise KeyError(f"Task '{task_id}' not found")
         _, _, task = result
-        # Enforce single in_progress
-        if status == "in_progress":
-            current = self.data["meta"].get("current_task")
+        previous_status = task.get("status", "todo")
+        current = self.data["meta"].get("current_task")
+
+        if status in ACTIVE_STATUSES:
             if current and current != task_id:
                 cur = self._get_task(current)
-                if cur and cur[2]["status"] == "in_progress":
+                if cur and self._task_is_active(cur[2]):
                     raise RuntimeError(
-                        f"Task '{current}' is already in_progress. "
+                        f"Task '{current}' is already active. "
                         "Complete or move it first."
                     )
-            self.data["meta"]["current_task"] = task_id
+            if previous_status == "todo" or previous_status == status:
+                self.data["meta"]["current_task"] = task_id
+            elif self.data["meta"].get("current_task") == task_id:
+                self.data["meta"]["current_task"] = None
+        else:
+            if self.data["meta"].get("current_task") == task_id:
+                self.data["meta"]["current_task"] = None
+
         task["status"] = status
-        # Clear current_task reference when leaving in_progress
-        if status != "in_progress" and self.data["meta"].get("current_task") == task_id:
-            self.data["meta"]["current_task"] = None
+        if status == "done":
+            task.pop("resume", None)
         return task
 
-    def pickup_next(self) -> Optional[dict]:
-        """Pick up the next unblocked task from the current phase.
-
-        Advances to the next phase automatically when the current one
-        is fully done.  Returns the picked-up task, or None if nothing
-        is available.
-        """
+    def pickup_next(self, exclude_task_ids: Optional[set[str]] = None) -> Optional[dict]:
+        """Pick the next resumable task, then the next unblocked todo task."""
+        exclude_task_ids = exclude_task_ids or set()
         meta = self.data["meta"]
 
-        # If something is already in_progress, return it
-        if meta.get("current_task"):
+        # If something is already active, return it.
+        if meta.get("current_task") and meta["current_task"] not in exclude_task_ids:
             result = self._get_task(meta["current_task"])
-            if result and result[2]["status"] == "in_progress":
+            if result and result[2]["status"] != "done":
+                meta["current_phase"] = result[0]["id"]
                 return result[2]
+            meta["current_task"] = None
+
+        # Prefer resumable work before fresh todo items.
+        for status in RESUME_PRIORITY:
+            for phase, _, task in self._all_tasks():
+                if task["id"] in exclude_task_ids:
+                    continue
+                if task.get("status", "todo") == status:
+                    meta["current_phase"] = phase["id"]
+                    return self.set_status(task["id"], status)
 
         # Walk phases forward until we find work or run out
         for phase in self.data["phases"]:
@@ -157,8 +203,10 @@ class Kanban:
 
             # Find first unblocked task in this phase
             for _, _, task in self._all_tasks():
+                if task["id"] in exclude_task_ids:
+                    continue
                 if task["status"] == "todo" and self.is_task_unblocked(task):
-                    return self.set_status(task["id"], "in_progress")
+                    return self.set_status(task["id"], "project_manager")
 
             # Phase has pending work but everything is blocked
             return None
@@ -166,7 +214,7 @@ class Kanban:
         return None  # All phases complete
 
     def complete_current(self) -> Optional[dict]:
-        """Mark the current in_progress task as done and auto-advance."""
+        """Mark the current task as done and auto-advance."""
         meta = self.data["meta"]
         current_id = meta.get("current_task")
         if not current_id:
@@ -175,13 +223,50 @@ class Kanban:
         return self.pickup_next()
 
     def review_current(self) -> Optional[dict]:
-        """Move the current in_progress task to in_review and auto-advance."""
+        """Move the current task to code review and auto-advance."""
         meta = self.data["meta"]
         current_id = meta.get("current_task")
         if not current_id:
             return None
-        self.set_status(current_id, "in_review")
-        return self.pickup_next()
+        self.set_status(current_id, "code_review")
+        return self.pickup_next(exclude_task_ids={current_id})
+
+    def get_resume_payload(self, task_id: str, stage: Optional[str] = None) -> dict | None:
+        result = self._get_task(task_id)
+        if result is None:
+            raise KeyError(f"Task '{task_id}' not found")
+        resume = result[2].get("resume", {})
+        if stage is None:
+            return resume
+        return resume.get(stage)
+
+    def set_resume_payload(
+        self,
+        task_id: str,
+        stage: str,
+        input_text: str,
+        output: str | None = None,
+        confirmed: bool = False,
+    ) -> dict:
+        result = self._get_task(task_id)
+        if result is None:
+            raise KeyError(f"Task '{task_id}' not found")
+        task = result[2]
+        resume = self._task_resume(task)
+        payload: dict = {
+            "input": input_text,
+            "confirmed": confirmed,
+        }
+        if output is not None:
+            payload["output"] = output
+        resume[stage] = payload
+        return payload
+
+    def clear_resume_payload(self, task_id: str) -> None:
+        result = self._get_task(task_id)
+        if result is None:
+            raise KeyError(f"Task '{task_id}' not found")
+        result[2].pop("resume", None)
 
     # ── Progress / visualization ───────────────────────────────────
 
@@ -189,6 +274,12 @@ class Kanban:
         """Return overall and per-phase progress counters."""
         phases = []
         total = done = 0
+        current_task_status = None
+        current_task = self.data["meta"].get("current_task")
+        if current_task:
+            result = self._get_task(current_task)
+            if result:
+                current_task_status = result[2].get("status")
         for phase in self.data["phases"]:
             p_total = p_done = 0
             for comp in phase["components"]:
@@ -214,6 +305,7 @@ class Kanban:
             "phases": phases,
             "current_phase": self.data["meta"]["current_phase"],
             "current_task": self.data["meta"].get("current_task"),
+            "current_task_status": current_task_status,
         }
 
     def visualize(self) -> str:
@@ -229,10 +321,14 @@ class Kanban:
         lines.append(
             f"  Progress: {prog['done']}/{prog['total']} tasks ({prog['pct']}%)"
         )
-        lines.append(
-            f"  Current phase: {prog['current_phase']}  │  "
-            f"Current task: {prog['current_task'] or '—'}"
-        )
+        current_task = prog["current_task"]
+        current_task_status = prog.get("current_task_status")
+        current_task_text = "—"
+        if current_task:
+            current_task_text = current_task
+            if current_task_status:
+                current_task_text = f"{current_task} ({current_task_status})"
+        lines.append(f"  Current phase: {prog['current_phase']}  │  Current task: {current_task_text}")
         lines.append("─" * 72)
 
         # ── Swim lanes ─────────────────────────────────────────────
@@ -244,8 +340,9 @@ class Kanban:
                 lines.append("    (empty)")
             else:
                 for t in tasks:
+                    active = " ◄ current" if t["id"] == prog["current_task"] else ""
                     blocked = "" if self.is_task_unblocked(t) else " 🔒"
-                    lines.append(f"    • {t['id']}{blocked}")
+                    lines.append(f"    • {t['id']}{active}{blocked}")
         lines.append("")
 
         # ── Per-phase progress bar ─────────────────────────────────
@@ -308,7 +405,7 @@ def main():
     elif cmd == "review":
         task = kb.review_current()
         kb.save()
-        print("Moved to review.")
+        print("Moved to code review.")
         if task:
             print(f"Next: {task['id']}")
         else:
