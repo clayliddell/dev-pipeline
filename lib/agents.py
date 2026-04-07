@@ -83,13 +83,19 @@ def _build_ssh_remote_command(
     cmd: list[str], project_dir: Path, opencode_config_path: Path
 ) -> str:
     """Build a shell command for remote execution over SSH."""
+    opencode_config_content: str|None = None
+
+    with open(opencode_config_path, 'r') as file:
+        opencode_config_content = json.load(file)
+        opencode_config_content = json.dumps(opencode_config_content)
+
     opencode_cmd = shlex.join(
         [
             "env",
             "TERM=dumb",
             "COLUMNS=512",
             "LINES=200",
-            f"OPENCODE_CONFIG={opencode_config_path}",
+            f"OPENCODE_CONFIG_CONTENT={opencode_config_content}" if opencode_config_content else "",
             "stdbuf",
             "-oL",
             "-eL",

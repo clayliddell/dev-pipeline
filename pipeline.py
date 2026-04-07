@@ -841,12 +841,12 @@ def resolve_opencode_config_path(unresolved_opencode_config_path: str,
     '/absolute/path/to/opencode.json' ->
       '/absolute/path/to/opencode.json'
     """
-    opencode_config_path = Path(unresolved_opencode_config_path)
+    opencode_config_path = Path(unresolved_opencode_config_path).expanduser()
     if not unresolved_opencode_config_path.startswith('/'):
-        if ssh_repo_path:
-            opencode_config_path = ssh_repo_path / opencode_config_path
-        else:
-            opencode_config_path = local_repo_path / opencode_config_path
+        opencode_config_path = local_repo_path / opencode_config_path
+
+    if not opencode_config_path.exists():
+        raise PipelineError(f"Error in config: File not found {opencode_config_path}")
 
     return opencode_config_path
 
@@ -918,6 +918,7 @@ def main(argv: list[str] | None = None) -> None:
             remote_name=config.remote_name,
             log_path=config.log_path,
             json_log_path=config.json_log_path,
+            opencode_config_path=config.opencode_config_path,
         )
 
         run_pipeline(config, kanban)
