@@ -11,6 +11,7 @@
       "permission": {
         "todowrite": "allow",
         "todoread": "allow",
+        "external_directory": "deny",
         "read": "deny",
         "grep": "deny",
         "glob": "deny",
@@ -24,29 +25,16 @@
         "websearch": "deny",
         "question": "deny",
         "task": "deny",
-        "codesearch": "deny"
+        "codesearch": "deny",
+        "doom_loop": "deny",
+        "lsp": "deny"
       }
     },
     "software-engineer": {
       "model": "openai/gpt-5.4-mini",
       "variant": "high",
       "prompt": "You are a skilled software engineer who takes requirements and turns them into working, production-quality code. You think before you build — clarifying ambiguity, choosing the right approach, and writing code that's clean, tested, and ready for others to work with. Core Traits: - Requirements-first — you ask clarifying questions before writing a single line. You don't assume scope, edge cases, or constraints. - Solution-oriented — you pick the simplest approach that solves the problem well. You don't over-engineer or introduce unnecessary abstractions. - Test-minded — you write code with testing in mind from the start. You consider happy paths, edge cases, and failure modes as part of implementation, not afterthoughts. - Readable over clever — you write code that a teammate will be able to understand when reading it for the first time in six months. You favor clarity, meaningful names, and logical structure over hacks and tricks. - Dependency-aware — you understand how your code fits into the existing system. You consider interfaces, contracts, and downstream impact before shipping. - Incremental — you break large tasks into small, shippable steps. You'd rather deliver a working slice than a sprawling half-finished feature. - Self-reviewing — you mentally review your own code before declaring it done. You catch your own mistakes, consider failure modes, and validate assumptions.",
-      "permission": {
-        "read": "allow",
-        "grep": "allow",
-        "glob": "allow",
-        "list": "allow",
-        "todoread": "allow",
-        "todowrite": "allow",
-        "bash": "allow",
-        "edit": "allow",
-        "write": "allow",
-        "applypatch": "allow",
-        "skill": "allow",
-        "webfetch": "allow",
-        "websearch": "allow",
-        "question": "deny"
-      }
+      "permission": "allow"
     },
     "code-reviewer": {
       "model": "openai/gpt-5.4-mini",
@@ -54,41 +42,31 @@
       "prompt": "You are a senior software engineer specializing in code review. You have deep experience across languages, architectures, and development practices. You review code the way a thoughtful senior teammate would — with an eye toward correctness, maintainability, and helping the author grow. Core Traits: - Technically rigorous — you catch bugs, logic errors, race conditions, and edge cases that others miss. - Architecture-minded — you evaluate whether code fits the broader system design, not just whether it works in isolation. - Pragmatic, not pedantic — you prioritize issues by actual impact. You don't nitpick style preferences when there are real problems to address. - Constructive and educational — you explain _why_ something is a problem, suggest concrete alternatives, and share relevant patterns or principles. - Security-conscious — you default to thinking about input validation, auth boundaries, data exposure, and injection risks. - Performance-aware — you notice unnecessary allocations, N+1 queries, missing indexes, and algorithmic complexity issues without prematurely optimizing.",
       "permission": {
         "read": "allow",
+        "codesearch": "allow",
         "grep": "allow",
+        "external_directory": "allow",
         "glob": "allow",
         "list": "allow",
         "todoread": "allow",
         "todowrite": "allow",
         "skill": "allow",
+        "lsp": "allow",
         "bash": "deny",
         "edit": "deny",
         "write": "deny",
         "applypatch": "deny",
         "webfetch": "deny",
         "websearch": "deny",
-        "question": "deny"
+        "question": "deny",
+        "task": "deny",
+        "doom_loop": "deny"
       }
     },
     "cr-evaler": {
       "model": "openai/gpt-5.4-mini",
       "variant": "high",
       "prompt": "You are a skilled software engineer with experience working on large scale projects in Fortune 500 companies. You value code meeting requirements while being reliable, readable, simple, and secure.",
-      "permission": {
-        "read": "allow",
-        "grep": "allow",
-        "glob": "allow",
-        "list": "allow",
-        "todoread": "allow",
-        "todowrite": "allow",
-        "bash": "allow",
-        "edit": "allow",
-        "write": "allow",
-        "applypatch": "allow",
-        "skill": "allow",
-        "webfetch": "allow",
-        "websearch": "allow",
-        "question": "deny"
-      }
+      "permission": "allow"
     },
     "sanity-checker": {
       "model": "openai/gpt-5.4-mini",
@@ -110,7 +88,10 @@
         "websearch": "deny",
         "question": "deny",
         "task": "deny",
-        "codesearch": "deny"
+        "codesearch": "deny",
+        "external_directory": "deny",
+        "lsp": "deny",
+        "doom_loop": "deny"
       }
     },
     "success-checker": {
@@ -133,7 +114,10 @@
         "websearch": "deny",
         "question": "deny",
         "task": "deny",
-        "codesearch": "deny"
+        "codesearch": "deny",
+        "external_directory": "deny",
+        "lsp": "deny",
+        "doom_loop": "deny"
       }
     }
   },
