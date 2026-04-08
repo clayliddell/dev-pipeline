@@ -71,6 +71,7 @@ class TestDryRunSingleTask:
         kanban.save()
 
         captured: dict[str, str] = {}
+        events: list[str] = []
 
         def fake_build_swe_prompt(pm_output: str) -> str:
             captured["pm_output"] = pm_output
@@ -81,6 +82,79 @@ class TestDryRunSingleTask:
         run_pipeline(config, kanban)
 
         assert captured["pm_output"] == "cached plan output"
+        assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "done"
+
+    def test_software_engineer_success_check_uses_diff_and_task_prompt(
+        self, project_tree, monkeypatch
+    ):
+        config = PipelineConfig(
+            local_repo_path=project_tree,
+            kanban_path=project_tree / "env" / "kanban.json",
+            docs_path=project_tree / "docs",
+            base_branch="main",
+            remote_name="origin",
+            loop_until_phase_complete=False,
+            dry_run=True,
+        )
+        kanban = Kanban(config.kanban_path)
+        kanban.load()
+        kanban.set_status("phase-1.comp-a.task-1", "software_engineer")
+        kanban.set_resume_payload(
+            "phase-1.comp-a.task-1",
+            "project_manager",
+            "cached pm input",
+            output="cached plan output",
+            confirmed=True,
+        )
+        kanban.save()
+
+        captured: dict[str, str] = {}
+        events: list[str] = []
+
+        def fake_build_swe_prompt(pm_output: str) -> str:
+            captured["pm_output"] = pm_output
+            return "swe prompt from pm output"
+
+        def fake_mock_run_agent(prompt, project_dir, opencode_config_path, agent="default", **kwargs):
+            events.append("agent")
+            return pipeline.AgentRunResult(response="swe output", session_id=None)
+
+        def fake_get_diff(repo_path, base_branch):
+            events.append("diff")
+            assert "agent" in events
+            captured["base_branch"] = base_branch
+            return "+implemented change"
+
+        def fake_mock_check_agent_success(
+            project_dir,
+            opencode_config_path,
+            *,
+            agent,
+            agent_name,
+            prior_result,
+            evaluation_context=None,
+            task_id="",
+            step_num=0,
+            step_title="",
+            ssh_host=None,
+        ):
+            events.append("success")
+            if agent == "software-engineer":
+                captured["evaluation_context"] = evaluation_context or ""
+            return pipeline.AgentRunResult(response="yes", session_id=None)
+
+        monkeypatch.setattr("pipeline.build_swe_prompt", fake_build_swe_prompt)
+        monkeypatch.setattr("pipeline.mock_run_agent", fake_mock_run_agent)
+        monkeypatch.setattr("pipeline.get_diff", fake_get_diff)
+        monkeypatch.setattr("pipeline.mock_check_agent_success", fake_mock_check_agent_success)
+
+        run_pipeline(config, kanban)
+
+        assert captured["pm_output"] == "cached plan output"
+        assert captured["base_branch"] == "main"
+        assert events[:3] == ["agent", "diff", "success"]
+        assert "Task Prompt:\nswe prompt from pm output" in captured["evaluation_context"]
+        assert "Git Diff vs main:\n+implemented change" in captured["evaluation_context"]
         assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "done"
 
     def test_resumes_code_review_eval_without_rerunning_earlier_stages(
@@ -171,6 +245,7 @@ class TestDryRunSingleTask:
             agent,
             agent_name,
             prior_result,
+            evaluation_context=None,
             task_id="",
             step_num=0,
             step_title="",

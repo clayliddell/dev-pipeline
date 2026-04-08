@@ -1,7 +1,11 @@
 """Git operations helper for the pipeline."""
 
+import os
 from pathlib import Path
 import subprocess
+
+class GitError(Exception):
+    pass
 
 
 class GitRebaseError(Exception):
@@ -106,9 +110,67 @@ def create_or_checkout_branch(repo: Path, branch: str, source_branch: str) -> No
 
 
 def get_diff(repo: Path, base: str = "main") -> str:
-    result = _run(["git", "diff", f"{base}...HEAD"], repo)
-    return result.stdout
+    """
+    Show a combined diff of:
+      1. Tracked file changes vs the given branch.
+      2. Untracked (non-ignored) files — always for code/doc types,
+         only if < 20KB for everything else.
+    """
+    # Max File size to include in diff in bytes (~20 KB)
+    SIZE_THRESHOLD = 20480
+    # File extensions we always include regardless of size
+    ALWAYS_INCLUDE = {".sql", ".go", ".sh", ".py", ".md"}
 
+    output_parts: list[str] = []
+
+    # --- 1. Tracked changes vs branch ---
+    git_cmd = ["git", "merge-base", base, "HEAD"]
+    result = _run(git_cmd, repo)
+
+    if not result.stdout:
+        raise GitError("Command [{git_cmd}] failed with error: [{result.stderr}]")
+    merge_base_commit_hash = result.stdout.rstrip()
+
+    result = _run(
+        ["git", "diff", merge_base_commit_hash],
+        repo
+    )
+    if result.stdout:
+        output_parts.append(result.stdout)
+
+    # --- 2. Untracked files (respecting .gitignore) ---
+    result = _run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        repo
+    )
+    untracked_files = result.stdout.splitlines()
+
+    for filepath in untracked_files:
+        absolute_filepath = repo / filepath
+        if not os.path.isfile(absolute_filepath):
+            continue
+
+        _, ext = os.path.splitext(absolute_filepath)
+        ext = ext.lower()
+
+        if ext not in ALWAYS_INCLUDE:
+            try:
+                file_size = os.path.getsize(absolute_filepath)
+            except OSError:
+                continue
+            if file_size >= SIZE_THRESHOLD:
+                continue
+
+        # Show diff of an untracked file (compared to /dev/null)
+        diff = _run(
+            ["git", "diff", "--no-index", "/dev/null", str(absolute_filepath)],
+            repo,
+            check=False
+        )
+        if diff.stdout:
+            output_parts.append(diff.stdout)
+
+    return "\n".join(output_parts)
 
 def get_file_tree(repo: Path, max_depth: int = 4, max_entries: int = 200) -> str:
     result = _run(

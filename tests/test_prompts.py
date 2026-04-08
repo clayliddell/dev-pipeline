@@ -9,6 +9,7 @@ from lib.agents import (
     _build_ssh_remote_command,
     _build_opencode_command,
     _normalize_opencode_fragment,
+    check_agent_success,
     success_response_found,
 )
 from lib.prompts import (
@@ -131,25 +132,30 @@ class TestNormalizeOpencodeFragment:
 
 
 class TestBuildSshRemoteCommand:
-    def test_quotes_project_dir_and_builds_shell_command(self):
+    def test_quotes_project_dir_and_builds_shell_command(self, tmp_path: Path):
+        config_path = tmp_path / "agents.opencode.jsonc"
+        config_path.write_text("{}")
+
         ssh_cmd = _build_ssh_remote_command(
             ["/home/agent/.opencode/bin/opencode", "run", "prompt text", "--format", "json"],
             Path("/remote/repo with spaces"),
-            Path("/tmp/local/agents.opencode.jsonc"),
+            config_path,
         )
 
-        assert ssh_cmd.startswith("cd '/remote/repo with spaces' && env TERM=dumb COLUMNS=512 LINES=200 OPENCODE_CONFIG=/tmp/local/agents.opencode.jsonc stdbuf -oL -eL /home/agent/.opencode/bin/opencode run 'prompt text' --format json")
+        assert ssh_cmd.startswith("cd '/remote/repo with spaces' && env TERM=dumb COLUMNS=512 LINES=200 'OPENCODE_CONFIG_CONTENT={}' stdbuf -oL -eL /home/agent/.opencode/bin/opencode run 'prompt text' --format json")
         assert "TERM=dumb" in ssh_cmd
         assert "COLUMNS=512" in ssh_cmd
         assert "LINES=200" in ssh_cmd
-        assert "OPENCODE_CONFIG=" in ssh_cmd
-        assert "agents.opencode.jsonc" in ssh_cmd
+        assert "OPENCODE_CONFIG_CONTENT" in ssh_cmd
         assert "/home/agent/.opencode/bin/opencode run 'prompt text' --format json" in ssh_cmd
 
 
 class TestEnsureAgentSucceeded:
     def test_returns_original_response_when_followup_says_yes(self, tmp_path: Path):
+        captured: dict[str, str | None] = {}
+
         def fake_success_check(*args, **kwargs):
+            captured["evaluation_context"] = kwargs.get("evaluation_context")
             return AgentRunResult(response="YES", session_id="abc")
 
         result = ensure_agent_succeeded(
@@ -161,10 +167,12 @@ class TestEnsureAgentSucceeded:
             task_id="task-1",
             step_num=3,
             step_title="Project Manager",
+            success_check_input="Task Prompt:\nDo the thing\n\nGit Diff vs main:\n+done",
             success_check_fn=fake_success_check,
         )
 
         assert result == "plan output"
+        assert captured["evaluation_context"] == "Task Prompt:\nDo the thing\n\nGit Diff vs main:\n+done"
 
     def test_raises_when_followup_does_not_say_yes(self, tmp_path: Path):
         def fake_success_check(*args, **kwargs):
@@ -182,3 +190,33 @@ class TestEnsureAgentSucceeded:
                 step_title="Project Manager",
                 success_check_fn=fake_success_check,
             )
+
+
+class TestCheckAgentSuccess:
+    def test_uses_evaluation_context_for_swe(self, tmp_path: Path, monkeypatch):
+        captured: dict[str, str] = {}
+
+        def fake_run(cmd, prompt, project_dir, opencode_config_path, agent, agent_name, task_id, step_num, step_title, ssh_host):
+            captured["prompt"] = prompt
+            captured["agent"] = agent
+            return AgentRunResult(response="yes", session_id="sess-1")
+
+        monkeypatch.setattr("lib.agents._run_opencode_command", fake_run)
+
+        result = check_agent_success(
+            tmp_path,
+            tmp_path / "agents.opencode.jsonc",
+            agent="software-engineer",
+            agent_name="Software Engineer",
+            prior_result=AgentRunResult(response="agent response", session_id="sess-1"),
+            evaluation_context="Task Prompt:\nImplement foo\n\nGit Diff vs main:\n+foo",
+            task_id="task-1",
+            step_num=4,
+            step_title="Software Engineer",
+        )
+
+        assert result.response == "yes"
+        assert captured["agent"] == "success-checker"
+        assert "Inspect the task prompt and the git diff against the base branch." in captured["prompt"]
+        assert "Evaluation Context:" in captured["prompt"]
+        assert "Agent Response:" not in captured["prompt"]

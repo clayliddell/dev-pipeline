@@ -25,8 +25,9 @@ SUCCESS_CHECK_PROMPT = {
         " Respond 'yes' or 'no'"
     ),
     "software-engineer": (
-        "Was the agent able to implement the requested changes?"
-        " Respond 'yes' or 'no'"
+        "Inspect the task prompt and the git diff against the base branch."
+        " Respond 'yes' only if the diff shows the requested changes were"
+        " implemented, otherwise respond 'no'"
     ),
     "code-reviewer": (
         "Did the agent review the code?"
@@ -374,17 +375,18 @@ def check_agent_success(
     agent: str,
     agent_name: str,
     prior_result: AgentRunResult,
+    evaluation_context: str | None = None,
     task_id: str = "",
     step_num: int = 0,
     step_title: str = "",
     ssh_host: str | None = None,
 ) -> AgentRunResult:
     """Ask the same session whether its just-completed task was successful."""
-    # build prompt
-    prompt = SUCCESS_CHECK_PROMPT.get(
-        agent, SUCCESS_CHECK_PROMPT["default"])
-    prompt += f"\n\nAgent Response:\n{prior_result.response}"
-    # call agent
+    prompt = SUCCESS_CHECK_PROMPT.get(agent, SUCCESS_CHECK_PROMPT["default"])
+    if evaluation_context is None:
+        prompt += f"\n\nAgent Response:\n{prior_result.response}"
+    else:
+        prompt += f"\n\nEvaluation Context:\n{evaluation_context}"
     cmd = _build_opencode_command(prompt, agent="success-checker")
     return _run_opencode_command(
         cmd,

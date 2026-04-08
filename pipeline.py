@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 import subprocess
 
@@ -293,6 +294,8 @@ def run_agent_stage(
     prompt: str,
     agent_fn,
     success_check_fn,
+    success_check_input: str | None = None,
+    success_check_input_fn: Callable[[], str] | None = None,
 ):
     log_pipeline_event(
         "step.start",
@@ -336,13 +339,14 @@ def run_agent_stage(
             confirmed=False,
         )
         kanban.save()
-
         message = ensure_agent_succeeded(
             config.ssh_repo_path or config.local_repo_path,
             config.opencode_config_path,
             agent=agent,
             agent_name=agent_name,
             result=result,
+            success_check_input=success_check_input,
+            success_check_input_fn=success_check_input_fn,
             task_id=task_id,
             step_num=step_num,
             step_title=step_title,
@@ -440,6 +444,7 @@ def mock_check_agent_success(
     agent: str,
     agent_name: str,
     prior_result: AgentRunResult,
+    evaluation_context: str | None = None,
     task_id: str = "",
     step_num: int = 0,
     step_title: str = "",
@@ -455,18 +460,23 @@ def ensure_agent_succeeded(
     agent: str,
     agent_name: str,
     result: AgentRunResult,
+    success_check_input: str | None = None,
+    success_check_input_fn: Callable[[], str] | None = None,
     task_id: str,
     step_num: int,
     step_title: str,
     success_check_fn,
     ssh_host: str | None = None,
 ) -> str:
+    if success_check_input_fn is not None:
+        success_check_input = success_check_input_fn()
     success_result = success_check_fn(
         project_dir,
         opencode_config_path,
         agent=agent,
         agent_name=agent_name,
         prior_result=result,
+        evaluation_context=success_check_input,
         task_id=task_id,
         step_num=step_num,
         step_title=f"{step_title} Success Check",
@@ -665,6 +675,12 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
                 prompt=swe_prompt,
                 agent_fn=agent_fn,
                 success_check_fn=success_check_fn,
+                success_check_input_fn=lambda: (
+                    f"<Task Prompt>\n{swe_prompt}</Task Prompt>\n\n"
+                    f"<Git Diff vs {config.base_branch}>"
+                    f"{get_diff(git_repo_path, config.base_branch)}"
+                    f"</Git Diff vs {config.base_branch}>"
+                ),
             )
 
         # ── 5. Move to review ─────────────────────────────────────
