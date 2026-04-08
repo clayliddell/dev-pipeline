@@ -5,3 +5,4 @@ log.txt
 json-log.txt
 env
 .env
+*.swp
