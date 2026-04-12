@@ -37,7 +37,7 @@ SUCCESS_CHECK_PROMPT = {
         "Did the agent evaluate the code review?"
         " Respond 'yes' or 'no'"
     ),
-    "sanity-checker": (
+    "exit-criteria-met": (
         "Did the agent confirm the git diff fulfilled the exit criteria?"
         " Respond 'yes' or 'no'"
     ),
@@ -61,6 +61,7 @@ def _build_opencode_command(
     prompt: str,
     *,
     agent: str,
+    session_id: str | None = None,
 ) -> list[str]:
     opencode_command = "/home/agent/.opencode/bin/opencode"
     cmd = [
@@ -73,6 +74,8 @@ def _build_opencode_command(
         "--format",
         "json",
     ]
+    if session_id:
+        cmd.extend(["--session", session_id])
     return cmd
 
 def _normalize_opencode_fragment(fragment: str) -> str:
@@ -346,9 +349,10 @@ def run_agent(
     step_num: int = 0,
     step_title: str = "",
     ssh_host: str | None = None,
+    session_id: str | None = None,
 ) -> AgentRunResult:
     """Run an opencode agent and print block output."""
-    cmd = _build_opencode_command(prompt, agent=agent)
+    cmd = _build_opencode_command(prompt, agent=agent, session_id=session_id)
     return _run_opencode_command(
         cmd,
         prompt,

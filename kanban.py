@@ -11,7 +11,7 @@ SWIMLANES = {
     "software_engineer": "Software Engineer",
     "code_review": "Code Review",
     "code_review_eval": "Code Review Eval",
-    "sanity_check": "Sanity Check",
+    "exit_criteria_met": "Exit Criteria Met Check",
     "finalization": "Finalization",
     "done": "Done",
 }

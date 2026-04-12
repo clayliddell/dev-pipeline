@@ -29,6 +29,25 @@ class TestLoad:
         assert kb._get_task("phase-1.comp-a.task-1")[2]["status"] == "project_manager"
         assert kb._get_task("phase-1.comp-a.task-2")[2]["status"] == "code_review"
 
+    def test_load_normalizes_legacy_exit_criteria_status(self, tmp_path, sample_kanban_data):
+        sample_kanban_data["phases"][0]["components"][0]["tasks"][0]["status"] = (
+            "exit_criteria_met"
+        )
+        sample_kanban_data["phases"][0]["components"][0]["tasks"][0]["resume"] = {
+            "exit_criteria_met": {"input": "old input", "confirmed": True}
+        }
+        path = tmp_path / "kanban.json"
+        path.write_text(json.dumps(sample_kanban_data, indent=2))
+
+        kb = Kanban(path)
+        kb.load()
+
+        assert kb._get_task("phase-1.comp-a.task-1")[2]["status"] == "exit_criteria_met"
+        assert (
+            kb._get_task("phase-1.comp-a.task-1")[2]["resume"]["exit_criteria_met"]
+            == {"input": "old input", "confirmed": True}
+        )
+
     def test_data_lazy_loads(self, kanban_file):
         kb = Kanban(kanban_file)
         assert kb._data == {}

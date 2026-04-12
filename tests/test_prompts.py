@@ -15,8 +15,10 @@ from lib.agents import (
 from lib.prompts import (
     build_cr_eval_prompt,
     build_cr_prompt,
+    build_exit_criteria_met_followup_prompt,
+    build_exit_criteria_met_prompt,
+    build_fulfill_exit_criteria_prompt,
     build_pm_prompt,
-    build_sanity_prompt,
     build_swe_prompt,
 )
 from pipeline import PipelineError, ensure_agent_succeeded
@@ -52,9 +54,18 @@ class TestBuildPmPrompt:
 
 class TestBuildSwePrompt:
     def test_contains_plan(self):
-        p = build_swe_prompt("do X then Y")
+        p = build_swe_prompt(
+            "do X then Y",
+            SAMPLE_TASK,
+            "ARCH",
+            "STD",
+            "PHASE",
+            "TREE",
+        )
         assert "do X then Y" in p
         assert "DONE" in p
+        assert "exit criteria are 100% satisfied" in p
+        assert "pre-commit hook passes" in p
 
 
 class TestBuildCrPrompt:
@@ -72,19 +83,54 @@ class TestBuildCrPrompt:
 
 class TestBuildCrEvalPrompt:
     def test_contains_feedback(self):
-        p = build_cr_eval_prompt("Fix line 42: missing error check")
+        p = build_cr_eval_prompt(
+            "Fix line 42: missing error check",
+            SAMPLE_TASK,
+            "ARCH",
+            "STD",
+            "PHASE",
+            "TREE",
+            "DIFF",
+        )
         assert "Fix line 42" in p
         assert "DONE" in p
+        assert "ARCHITECTURE" in p
+        assert "pre-commit hook passes" in p
 
 
-class TestBuildSanityPrompt:
+class TestBuildExitCriteriaMetPrompt:
     def test_requests_yes_or_no(self):
-        p = build_sanity_prompt(SAMPLE_TASK, "some diff")
+        p = build_exit_criteria_met_prompt(SAMPLE_TASK, "some diff")
         assert "Answer yes or no" in p
+        assert "Exit Criteria Met Check" in p
 
     def test_contains_exit_criteria(self):
-        p = build_sanity_prompt(SAMPLE_TASK, "some diff")
+        p = build_exit_criteria_met_prompt(SAMPLE_TASK, "some diff")
         assert "foo works" in p
+
+
+class TestBuildExitCriteriaMetFollowupPrompt:
+    def test_matches_requested_wording(self):
+        p = build_exit_criteria_met_followup_prompt()
+        assert "detailed checklist" in p
+        assert "coding agent" in p
+
+
+class TestBuildFulfillExitCriteriaPrompt:
+    def test_contains_feedback_and_docs(self):
+        p = build_fulfill_exit_criteria_prompt(
+            SAMPLE_TASK,
+            "ARCH",
+            "STD",
+            "PHASE",
+            "TREE",
+            "DIFF",
+            "- fix missing validation",
+        )
+        assert "fix missing validation" in p
+        assert "ARCH" in p
+        assert "STD" in p
+        assert "Output \"DONE\"" in p
 
 
 class TestPromptsDoNotRequireJson:
@@ -93,7 +139,7 @@ class TestPromptsDoNotRequireJson:
         assert '"task_success"' not in p
 
     def test_swe_prompt_has_no_json_contract(self):
-        p = build_swe_prompt("plan")
+        p = build_swe_prompt("plan", SAMPLE_TASK, "arch", "std", "phase", "tree")
         assert '"task_success"' not in p
 
     def test_cr_prompt_has_no_json_contract(self):
@@ -101,7 +147,15 @@ class TestPromptsDoNotRequireJson:
         assert '"task_success"' not in p
 
     def test_cr_eval_prompt_has_no_json_contract(self):
-        p = build_cr_eval_prompt("feedback")
+        p = build_cr_eval_prompt(
+            "feedback",
+            SAMPLE_TASK,
+            "arch",
+            "std",
+            "phase",
+            "tree",
+            "diff",
+        )
         assert '"task_success"' not in p
 
 

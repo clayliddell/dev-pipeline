@@ -29,7 +29,9 @@ from lib import (
     build_swe_prompt,
     build_cr_prompt,
     build_cr_eval_prompt,
-    build_sanity_prompt,
+    build_exit_criteria_met_prompt,
+    build_exit_criteria_met_followup_prompt,
+    build_fulfill_exit_criteria_prompt,
 )
 from lib.git import GitRebaseError
 from lib.jsonlog import close_json_log, log_json, setup_json_log
@@ -69,7 +71,7 @@ STAGE_ORDER = [
     "software_engineer",
     "code_review",
     "code_review_eval",
-    "sanity_check",
+    "exit_criteria_met",
     "finalization",
 ]
 
@@ -79,7 +81,7 @@ START_STAGE_BY_STATUS = {
     "software_engineer": "software_engineer",
     "code_review": "code_review",
     "code_review_eval": "code_review_eval",
-    "sanity_check": "sanity_check",
+    "exit_criteria_met": "exit_criteria_met",
     "finalization": "finalization",
 }
 
@@ -87,8 +89,8 @@ NEXT_STATUS_BY_STAGE = {
     "project_manager": "software_engineer",
     "software_engineer": "code_review",
     "code_review": "code_review_eval",
-    "code_review_eval": "sanity_check",
-    "sanity_check": "finalization",
+    "code_review_eval": "exit_criteria_met",
+    "exit_criteria_met": "finalization",
     "finalization": "done",
 }
 
@@ -407,6 +409,177 @@ def run_agent_stage(
     return message
 
 
+def run_exit_criteria_met_stage(
+    *,
+    config: PipelineConfig,
+    kanban: Kanban,
+    task: dict,
+    task_id: str,
+    next_status: str,
+    step_num: int,
+    agent_fn,
+    architecture: str,
+    code_standard: str,
+    phase_content: str,
+    fs_tree: str,
+):
+    stage = "exit_criteria_met"
+    step_title = "Exit Criteria Met Check"
+
+    log_pipeline_event(
+        "step.start",
+        task_id=task_id,
+        step_num=step_num,
+        step_title=step_title,
+    )
+    if config.step_by_step:
+        input("Press Enter to continue...")
+
+    activate_task_stage(kanban, task_id, stage)
+
+    diff = get_diff(config.local_repo_path, config.base_branch)
+    prompt = stage_resume_input(task, stage)
+    if prompt is None:
+        prompt = build_exit_criteria_met_prompt(task, diff)
+
+    save_stage_checkpoint(
+        kanban,
+        task_id,
+        stage,
+        prompt,
+        output_text=None,
+        confirmed=False,
+    )
+    kanban.save()
+
+    initial_result = agent_fn(
+        prompt,
+        config.ssh_repo_path or config.local_repo_path,
+        config.opencode_config_path,
+        agent="exit-criteria-met",
+        agent_name="Exit Criteria Met Check",
+        task_id=task_id,
+        step_num=step_num,
+        step_title=step_title,
+        ssh_host=config.ssh_host,
+    )
+
+    save_stage_checkpoint(
+        kanban,
+        task_id,
+        stage,
+        prompt,
+        output_text=initial_result.response,
+        confirmed=False,
+    )
+    kanban.save()
+
+    if success_response_found(initial_result.response):
+        save_stage_checkpoint(
+            kanban,
+            task_id,
+            stage,
+            prompt,
+            output_text=initial_result.response,
+            confirmed=True,
+        )
+        kanban.save()
+        advance_task_stage(
+            kanban,
+            task_id,
+            next_status,
+            step_num=step_num,
+            step_title=step_title,
+        )
+        log_pipeline_event(
+            "step.complete",
+            task_id=task_id,
+            step_num=step_num,
+            step_title=step_title,
+        )
+        return initial_result.response
+
+    checklist_prompt = build_exit_criteria_met_followup_prompt()
+    checklist_result = agent_fn(
+        checklist_prompt,
+        config.ssh_repo_path or config.local_repo_path,
+        config.opencode_config_path,
+        agent="exit-criteria-met",
+        agent_name="Exit Criteria Met Check",
+        task_id=task_id,
+        step_num=step_num,
+        step_title=f"{step_title} Follow-up",
+        ssh_host=config.ssh_host,
+        session_id=initial_result.session_id,
+    )
+
+    fulfill_prompt = build_fulfill_exit_criteria_prompt(
+        task,
+        architecture,
+        code_standard,
+        phase_content,
+        fs_tree,
+        diff,
+        checklist_result.response,
+    )
+    agent_fn(
+        fulfill_prompt,
+        config.ssh_repo_path or config.local_repo_path,
+        config.opencode_config_path,
+        agent="software-engineer",
+        agent_name="Fulfill Exit Criteria",
+        task_id=task_id,
+        step_num=step_num,
+        step_title="Fulfill Exit Criteria",
+        ssh_host=config.ssh_host,
+    )
+
+    updated_diff = get_diff(config.local_repo_path, config.base_branch)
+    recheck_prompt = build_exit_criteria_met_prompt(task, updated_diff)
+    recheck_result = agent_fn(
+        recheck_prompt,
+        config.ssh_repo_path or config.local_repo_path,
+        config.opencode_config_path,
+        agent="exit-criteria-met",
+        agent_name="Exit Criteria Met Check",
+        task_id=task_id,
+        step_num=step_num,
+        step_title=f"{step_title} Recheck",
+        ssh_host=config.ssh_host,
+    )
+
+    save_stage_checkpoint(
+        kanban,
+        task_id,
+        stage,
+        prompt,
+        output_text=recheck_result.response,
+        confirmed=success_response_found(recheck_result.response),
+    )
+    kanban.save()
+
+    if not success_response_found(recheck_result.response):
+        raise PipelineError(
+            f"Exit Criteria Met Check did not confirm success.\n"
+            f"Follow-up response was:\n{recheck_result.response[:500]}"
+        )
+
+    advance_task_stage(
+        kanban,
+        task_id,
+        next_status,
+        step_num=step_num,
+        step_title=step_title,
+    )
+    log_pipeline_event(
+        "step.complete",
+        task_id=task_id,
+        step_num=step_num,
+        step_title=step_title,
+    )
+    return recheck_result.response
+
+
 def mock_run_agent(
     prompt: str,
     project_dir: Path,
@@ -431,10 +604,18 @@ def mock_run_agent(
         )
     )
 
-    return AgentRunResult(
-        response="Dry-run: mock agent completed.",
-        session_id=session_id,
-    )
+    if agent == "exit-criteria-met" and prompt.startswith("Provide a detailed checklist"):
+        response = (
+            "- Review the exit criteria against the current diff.\n"
+            "- Implement the missing changes in the affected files.\n"
+            "- Re-run validation and confirm the hook passes."
+        )
+    elif agent == "exit-criteria-met":
+        response = "yes"
+    else:
+        response = "Dry-run: mock agent completed."
+
+    return AgentRunResult(response=response, session_id=session_id)
 
 
 def mock_check_agent_success(
@@ -660,7 +841,14 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             if swe_prompt is None:
                 if not pm_message:
                     raise PipelineError("Failed to resume task: PM message missing")
-                swe_prompt = build_swe_prompt(pm_message)
+                swe_prompt = build_swe_prompt(
+                    pm_message,
+                    task,
+                    architecture,
+                    code_standard,
+                    phase_content,
+                    fs_tree,
+                )
             run_agent_stage(
                 config=config,
                 kanban=kanban,
@@ -732,7 +920,16 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
             if cr_eval_prompt is None:
                 if not cr_message:
                     raise PipelineError("Failed to resume task: CR message missing")
-                cr_eval_prompt = build_cr_eval_prompt(cr_message)
+                diff = get_diff(git_repo_path, config.base_branch)
+                cr_eval_prompt = build_cr_eval_prompt(
+                    cr_message,
+                    task,
+                    architecture,
+                    code_standard,
+                    phase_content,
+                    fs_tree,
+                    diff,
+                )
             run_agent_stage(
                 config=config,
                 kanban=kanban,
@@ -749,27 +946,21 @@ def run_pipeline(config: PipelineConfig, kanban: Kanban) -> None:
                 success_check_fn=success_check_fn,
             )
 
-        # ── 8. Sanity Check Agent (no tool use) ───────────────────
-        if stage_index <= STAGE_ORDER.index("sanity_check"):
+        # ── 8. Exit Criteria Met Check Agent (no tool use) ─────────
+        if stage_index <= STAGE_ORDER.index("exit_criteria_met"):
             step = 8
-            diff = get_diff(git_repo_path, config.base_branch)
-            sanity_prompt = stage_resume_input(task, "sanity_check")
-            if sanity_prompt is None:
-                sanity_prompt = build_sanity_prompt(task, diff)
-            run_agent_stage(
+            run_exit_criteria_met_stage(
                 config=config,
                 kanban=kanban,
                 task=task,
                 task_id=task_id,
-                stage="sanity_check",
-                next_status=NEXT_STATUS_BY_STAGE["sanity_check"],
+                next_status=NEXT_STATUS_BY_STAGE["exit_criteria_met"],
                 step_num=step,
-                step_title="Sanity Check",
-                agent="sanity-checker",
-                agent_name="Sanity Check",
-                prompt=sanity_prompt,
                 agent_fn=agent_fn,
-                success_check_fn=success_check_fn,
+                architecture=architecture,
+                code_standard=code_standard,
+                phase_content=phase_content,
+                fs_tree=fs_tree,
             )
 
         # ── 9. Commit, merge and mark done ────────────────────────

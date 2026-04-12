@@ -17,7 +17,6 @@ from lib import (
     build_swe_prompt,
     build_cr_prompt,
     build_cr_eval_prompt,
-    build_sanity_prompt,
 )
 from lib.git import GitRebaseError
 
@@ -73,7 +72,7 @@ class TestDryRunSingleTask:
         captured: dict[str, str] = {}
         events: list[str] = []
 
-        def fake_build_swe_prompt(pm_output: str) -> str:
+        def fake_build_swe_prompt(pm_output: str, *args) -> str:
             captured["pm_output"] = pm_output
             return "swe prompt"
 
@@ -111,12 +110,14 @@ class TestDryRunSingleTask:
         captured: dict[str, str] = {}
         events: list[str] = []
 
-        def fake_build_swe_prompt(pm_output: str) -> str:
+        def fake_build_swe_prompt(pm_output: str, *args) -> str:
             captured["pm_output"] = pm_output
             return "swe prompt from pm output"
 
         def fake_mock_run_agent(prompt, project_dir, opencode_config_path, agent="default", **kwargs):
             events.append("agent")
+            if agent == "exit-criteria-met":
+                return pipeline.AgentRunResult(response="yes", session_id=None)
             return pipeline.AgentRunResult(response="swe output", session_id=None)
 
         def fake_get_diff(repo_path, base_branch):
@@ -153,8 +154,8 @@ class TestDryRunSingleTask:
         assert captured["pm_output"] == "cached plan output"
         assert captured["base_branch"] == "main"
         assert events[:3] == ["agent", "diff", "success"]
-        assert "Task Prompt:\nswe prompt from pm output" in captured["evaluation_context"]
-        assert "Git Diff vs main:\n+implemented change" in captured["evaluation_context"]
+        assert "<Task Prompt>\nswe prompt from pm output</Task Prompt>" in captured["evaluation_context"]
+        assert "<Git Diff vs main>+implemented change</Git Diff vs main>" in captured["evaluation_context"]
         assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "done"
 
     def test_resumes_code_review_eval_without_rerunning_earlier_stages(
@@ -191,12 +192,14 @@ class TestDryRunSingleTask:
         agents_called: list[str] = []
         cr_eval_inputs: dict[str, str] = {}
 
-        def fake_build_cr_eval_prompt(cr_output: str) -> str:
+        def fake_build_cr_eval_prompt(cr_output: str, *args) -> str:
             cr_eval_inputs["cr_output"] = cr_output
             return "cr eval prompt"
 
         def fake_mock_run_agent(prompt, project_dir, opencode_config_path, agent="default", **kwargs):
             agents_called.append(agent)
+            if agent == "exit-criteria-met":
+                return pipeline.AgentRunResult(response="yes", session_id=None)
             return pipeline.AgentRunResult(response="Dry-run: mock agent completed.", session_id=None)
 
         monkeypatch.setattr("pipeline.build_cr_eval_prompt", fake_build_cr_eval_prompt)
@@ -205,7 +208,62 @@ class TestDryRunSingleTask:
         run_pipeline(config, kanban)
 
         assert cr_eval_inputs["cr_output"] == "cached review output"
-        assert agents_called == ["cr-evaler", "sanity-checker"]
+        assert agents_called == ["cr-evaler", "exit-criteria-met"]
+        assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "done"
+
+    def test_exit_criteria_no_triggers_checklist_and_fulfillment(
+        self, project_tree, monkeypatch
+    ):
+        config = PipelineConfig(
+            local_repo_path=project_tree,
+            kanban_path=project_tree / "env" / "kanban.json",
+            docs_path=project_tree / "docs",
+            base_branch="main",
+            remote_name="origin",
+            loop_until_phase_complete=False,
+            dry_run=True,
+        )
+        kanban = Kanban(config.kanban_path)
+        kanban.load()
+        kanban.set_status("phase-1.comp-a.task-1", "exit_criteria_met")
+        kanban.set_resume_payload(
+            "phase-1.comp-a.task-1",
+            "project_manager",
+            "cached pm input",
+            output="cached plan output",
+            confirmed=True,
+        )
+        kanban.set_resume_payload(
+            "phase-1.comp-a.task-1",
+            "code_review",
+            "cached cr input",
+            output="cached review output",
+            confirmed=True,
+        )
+        kanban.save()
+
+        calls: list[tuple[str, str | None]] = []
+        exit_criteria_calls = {"count": 0}
+
+        def fake_run_agent(prompt, project_dir, opencode_config_path, agent="default", **kwargs):
+            calls.append((agent, kwargs.get("session_id")))
+            if agent == "exit-criteria-met" and prompt.startswith("Provide a detailed checklist"):
+                return pipeline.AgentRunResult(response="- add missing guard", session_id="sess-1")
+            if agent == "exit-criteria-met":
+                exit_criteria_calls["count"] += 1
+                if exit_criteria_calls["count"] == 1:
+                    return pipeline.AgentRunResult(response="no", session_id="sess-1")
+                return pipeline.AgentRunResult(response="yes", session_id=kwargs.get("session_id"))
+            return pipeline.AgentRunResult(response="yes", session_id=kwargs.get("session_id"))
+
+        monkeypatch.setattr("pipeline.mock_run_agent", fake_run_agent)
+
+        run_pipeline(config, kanban)
+
+        assert calls[0] == ("exit-criteria-met", None)
+        assert calls[1] == ("exit-criteria-met", "sess-1")
+        assert calls[2][0] == "software-engineer"
+        assert calls[3] == ("exit-criteria-met", None)
         assert kanban._get_task("phase-1.comp-a.task-1")[2]["status"] == "done"
 
     def test_failed_stage_keeps_input_and_reruns_from_start(self, project_tree, monkeypatch):
@@ -236,6 +294,8 @@ class TestDryRunSingleTask:
         def fake_mock_run_agent(prompt, project_dir, opencode_config_path, agent="default", **kwargs):
             if agent == "project-manager":
                 captured_prompts.append(prompt)
+            if agent == "exit-criteria-met":
+                return pipeline.AgentRunResult(response="yes", session_id=None)
             return pipeline.AgentRunResult(response="Draft plan", session_id=None)
 
         def fake_mock_check_agent_success(
